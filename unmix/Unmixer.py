@@ -970,33 +970,61 @@ class UnmixerWindow(QMainWindow):
         self.ax_spectrum.set_ylim(new_ymin, new_ymax)
         self.spectrum_canvas.draw_idle()
 
-    def _plot_spectrum(self, spectrum):
+    def update_spectrum_plot(self):
+        """Plot all saved spectra plus current active selection (matching HyperViewer)."""
         self.ax_spectrum.clear()
-        wavelengths = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, len(spectrum) + 1, dtype=float)
-        self.ax_spectrum.plot(wavelengths, spectrum, 'b-', linewidth=1, label="Selected Spectrum")
-        self.ax_spectrum.set_xlabel("Spectral Band")
+        sub_bg = self.subtract_bg_btn.isChecked() and self.background_spectrum is not None
+
+        has_data = False
+        # 1. Plot all saved/added spectra
+        for sdata in self.spectra_list:
+            if not sdata.visible:
+                continue
+            spec = sdata.spectrum - self.background_spectrum if sub_bg else sdata.spectrum
+            wl = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, len(spec) + 1, dtype=float)
+            self.ax_spectrum.plot(wl, spec, color=sdata.color, label=sdata.label, linewidth=1.5)
+
+            if sdata.std is not None:
+                self.ax_spectrum.fill_between(
+                    wl, spec - sdata.std, spec + sdata.std,
+                    alpha=0.2, color=sdata.color)
+            has_data = True
+
+        # 2. Plot active selection on top as 'Current' (black dashed line)
+        if self.current_selection is not None and 'spectrum' in self.current_selection:
+            spec = self.current_selection['spectrum']
+            if sub_bg and self.background_spectrum is not None:
+                spec = spec - self.background_spectrum
+            wl = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, len(spec) + 1, dtype=float)
+            self.ax_spectrum.plot(wl, spec, 'k--', linewidth=1.5, label='Current')
+
+            if self.current_selection.get('std') is not None:
+                std = self.current_selection['std']
+                self.ax_spectrum.fill_between(
+                    wl, spec - std, spec + std,
+                    alpha=0.25, color='black')
+            has_data = True
+
+        self.ax_spectrum.set_xlabel("Wavelength / Band")
         self.ax_spectrum.set_ylabel("Intensity")
         self.ax_spectrum.set_title("Extracted Spectra")
+
+        if has_data:
+            self.ax_spectrum.legend(loc='upper right', fontsize=8)
+
         self.ax_spectrum.grid(True, alpha=0.3)
 
-        if self.axes_locked and self.saved_xlim is not None:
+        if self.axes_locked and self.saved_xlim is not None and self.saved_ylim is not None:
             self.ax_spectrum.set_xlim(self.saved_xlim)
             self.ax_spectrum.set_ylim(self.saved_ylim)
 
         self.spectrum_canvas.draw_idle()
 
-    def _plot_residual(self, residual):
-        if residual is None or len(residual) == 0:
-            return
-        if residual.any() and self.current_selection and 'spectrum' in self.current_selection:
-            spectrum = self.current_selection['spectrum']
-            wavelengths = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, len(spectrum) + 1, dtype=float)
-            if len(residual) == len(spectrum):
-                self.ax_spectrum.fill_between(
-                    wavelengths, spectrum - residual, spectrum + residual,
-                    color='blue', alpha=0.2, label='±1 Std Dev')
-                self.ax_spectrum.legend(loc='best', fontsize=8)
-                self.spectrum_canvas.draw_idle()
+    def _plot_spectrum(self, spectrum=None):
+        self.update_spectrum_plot()
+
+    def _plot_residual(self, residual=None):
+        self.update_spectrum_plot()
 
     def add_current_spectrum(self):
         if self.current_selection is None or 'spectrum' not in self.current_selection:
@@ -1085,23 +1113,7 @@ class UnmixerWindow(QMainWindow):
         self._plot_all_spectra()
 
     def _plot_all_spectra(self):
-        self.ax_spectrum.clear()
-        sub_bg = self.subtract_bg_btn.isChecked() and self.background_spectrum is not None
-
-        for sdata in self.spectra_list:
-            if not sdata.visible:
-                continue
-            spec = sdata.spectrum - self.background_spectrum if sub_bg else sdata.spectrum
-            wl = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, len(spec) + 1, dtype=float)
-            self.ax_spectrum.plot(wl, spec, color=sdata.color, label=sdata.label, linewidth=1.2)
-
-        self.ax_spectrum.set_xlabel("Wavelength / Band")
-        self.ax_spectrum.set_ylabel("Intensity")
-        self.ax_spectrum.set_title("Extracted Spectra")
-        if any(s.visible for s in self.spectra_list):
-            self.ax_spectrum.legend(loc='best', fontsize=8)
-        self.ax_spectrum.grid(True, alpha=0.3)
-        self.spectrum_canvas.draw_idle()
+        self.update_spectrum_plot()
 
     def _export_all_spectra(self):
         if not self.spectra_list:
