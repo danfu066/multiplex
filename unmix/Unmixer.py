@@ -590,6 +590,12 @@ class UnmixerWindow(QMainWindow):
 
         # ---- Help menu ----
         help_menu = menubar.addMenu("Help")
+
+        help_action = QAction("User Guide (README)", self)
+        help_action.setShortcut("F1")
+        help_action.triggered.connect(self.show_help)
+        help_menu.addAction(help_action)
+
         about_action = QAction("About", self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
@@ -1735,24 +1741,60 @@ class UnmixerWindow(QMainWindow):
                 f.write(",".join(header) + "\n")
                 for y in range(H):
                     for x in range(W):
-                        c_vals = [str(self.concentrations[y, x, k]) for k in range(K)]
-                        r2_val = str(self.r_squared[y, x]) if self.r_squared is not None else ""
-                        res_val = str(self.residuals[y, x]) if self.residuals is not None else ""
-                        row = [str(y), str(x)] + c_vals + [r2_val, res_val]
-                        f.write(",".join(row) + "\n")
-            self.statusBar().showMessage(f"Exported unmixing results to {file_path}")
+                        comps = [str(self.concentrations[y, x, k]) for k in range(K)]
+                        r2 = str(self.r_squared[y, x]) if self.r_squared is not None else ""
+                        res = str(self.residuals[y, x]) if self.residuals is not None else ""
+                        f.write(f"{y},{x}," + ",".join(comps) + f",{r2},{res}\n")
+            self.statusBar().showMessage(f"Exported results to {file_path}")
         except Exception as e:
-            QMessageBox.critical(self, "Export Error", str(e))
+            QMessageBox.critical(self, "Error", f"Failed to export results: {e}")
 
     def show_about(self):
-        QMessageBox.about(self, "About Hyperspectral Unmixer",
-                          "Hyperspectral Unmixer v2.1\n"
-                          "Multiplexing Lab, University of Washington\n\n"
-                          "Features:\n"
-                          " • Full HyperViewer UI (spectral frame slider, XZ/YZ side views, reference library)\n"
-                          " • Pure unmix algorithm package (MCR-ALS, NMF, MESMA, PCA, SAM, SID, SVR, ICA)\n"
-                          " • Endmember extraction (N-FINDR, VCA) & Spectral peak fitting\n"
-                          " • ENVI, NPY, and Multipage TIFF Stack I/O")
+        """Show about / help dialog displaying README.md content."""
+        self.show_help()
+
+    def show_help(self):
+        """Show user guide and documentation from README.md in a scrollable dialog."""
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
+
+        possible_paths = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "README.md"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "README.md"),
+            os.path.join(os.getcwd(), "README.md"),
+        ]
+        readme_path = None
+        for p in possible_paths:
+            if os.path.exists(p):
+                readme_path = p
+                break
+
+        content = ""
+        if readme_path:
+            try:
+                with open(readme_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception as e:
+                content = f"Error reading README.md: {e}"
+        else:
+            content = "README.md file not found."
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("User Guide & Documentation - README.md")
+        dialog.resize(850, 650)
+        layout = QVBoxLayout(dialog)
+
+        text_edit = QTextEdit(dialog)
+        text_edit.setReadOnly(True)
+        if hasattr(text_edit, 'setMarkdown'):
+            text_edit.setMarkdown(content)
+        else:
+            text_edit.setPlainText(content)
+
+        layout.addWidget(text_edit)
+        close_btn = QPushButton("Close", dialog)
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        dialog.exec_()
 
 
 def main():

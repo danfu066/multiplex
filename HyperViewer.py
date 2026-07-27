@@ -470,7 +470,12 @@ class HyperViewer(QMainWindow):
         
         # Help menu
         help_menu = menubar.addMenu("Help")
-        
+
+        help_action = QAction("User Guide (README)", self)
+        help_action.setShortcut("F1")
+        help_action.triggered.connect(self.show_help)
+        help_menu.addAction(help_action)
+
         about_action = QAction("About", self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
@@ -1355,16 +1360,50 @@ class HyperViewer(QMainWindow):
     
     def show_about(self):
         """Show about dialog"""
-        QMessageBox.about(self, "About HyperViewer",
-                         "HyperViewer - Hyperspectral Image Viewer\n\n"
-                         "A tool for viewing and analyzing hyperspectral data.\n\n"
-                         "Features:\n"
-                         "• Load TIFF, NPY, MAT files\n"
-                         "• Interactive spectral frame viewing\n"
-                         "• Point, circle, and square selections\n"
-                         "• Multi-spectrum comparison\n"
-                         "• Export capabilities\n\n"
-                         "© 2024")
+        self.show_help()
+
+    def show_help(self):
+        """Show user guide and documentation from README.md in a scrollable dialog."""
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
+
+        possible_paths = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "README.md"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "README.md"),
+            os.path.join(os.getcwd(), "README.md"),
+        ]
+        readme_path = None
+        for p in possible_paths:
+            if os.path.exists(p):
+                readme_path = p
+                break
+
+        content = ""
+        if readme_path:
+            try:
+                with open(readme_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception as e:
+                content = f"Error reading README.md: {e}"
+        else:
+            content = "README.md file not found."
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("User Guide & Documentation - README.md")
+        dialog.resize(850, 650)
+        layout = QVBoxLayout(dialog)
+
+        text_edit = QTextEdit(dialog)
+        text_edit.setReadOnly(True)
+        if hasattr(text_edit, 'setMarkdown'):
+            text_edit.setMarkdown(content)
+        else:
+            text_edit.setPlainText(content)
+
+        layout.addWidget(text_edit)
+        close_btn = QPushButton("Close", dialog)
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        dialog.exec_()
 
     def load_reference_spectra(self):
         """Load reference spectra from file (CSV, XLSX, MAT, NPY, TXT)
