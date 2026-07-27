@@ -54,12 +54,14 @@ Select an ROI tool from the left panel:
 - **Add Current Selection**: Saves the active ROI to the spectrum list and renders its open outline marker permanently on the spatial image.
 - **Delete / Visibility**: Check/uncheck boxes to toggle individual spectrum visibility, click `×` to delete single spectra, or click **Delete Selected** to clear multiple selections. All spatial markers update in real time.
 
-### Color Scale & Contrast Editing
+### Spatial View Navigation & Color Controls (Bottom Bar)
+- **Built-in Matplotlib Zoom & Pan**: Integrated navigation toolbar directly under the spatial canvas providing rubber-band **Zoom 🔍** and hand **Pan ✋** tools for interactive spatial exploration.
 - **Unified Views**: Changing the colormap (e.g. `gray`, `viridis`, `plasma`, `jet`, `inferno`) applies the colormap and exact intensity limits simultaneously across **XY spatial view**, **XZ top side view**, and **YZ left side view**.
-- **Editable Color Limits (`C-Min` / `C-Max`)**: Type or adjust values in the `C-Min` and `C-Max` spinboxes to manually set contrast and color mapping limits across all 3 views and the colorbar.
-- **Auto Scale**: Click `Auto Scale` to reset the color limits to the current frame's automatic minimum and maximum intensity.
+- **Editable Color Limits (`C-Min` / `C-Max`)**: Type or adjust values in `C-Min` and `C-Max` spinboxes at the bottom of the spatial view to manually set contrast and color mapping limits across all 3 views and the colorbar.
+- **Auto Scale**: Click `Auto Scale` to reset color limits to the current frame's automatic minimum and maximum intensity.
 
-### Spatial Resample (Downscale / Upscale)
+### Spatial Resample (`Resample ▾`)
+- **Compact Dropdown Button**: Single `Resample ▾` dropdown button on the top toolbar for rapid spatial resolution scaling.
 - **Downscale (1/2, 1/3, 1/4)**: Uses $k \times k$ block-averaging to reduce spatial dimensions, shrinking pixel count by up to 16x and accelerating unmixing and OPD calculations by up to 1600%.
 - **Upscale (2x, 3x, 4x)**: Uses spatial bilinear interpolation to enlarge the image grid.
 

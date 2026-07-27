@@ -38,7 +38,7 @@ from PyQt5.QtGui import QKeySequence
 import matplotlib
 matplotlib.use("Qt5Agg")
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 from matplotlib.colors import Normalize
 from matplotlib.patches import Rectangle, Circle
@@ -244,40 +244,21 @@ class UnmixerWindow(QMainWindow):
         self.size_spin.setSuffix(" px")
         tool_layout.addWidget(self.size_spin)
 
-        tool_layout.addSpacing(10)
-        tool_layout.addWidget(QLabel("Colormap:"))
-        self.colormap_combo = QComboBox()
-        self.colormap_combo.addItems([
-            'gray', 'viridis', 'plasma', 'inferno', 'magma', 'cividis',
-            'jet', 'hot', 'cool', 'spring', 'summer', 'autumn', 'winter',
-            'bone', 'copper', 'red', 'green', 'blue'
-        ])
-        self.colormap_combo.setCurrentText('gray')
-        self.colormap_combo.currentTextChanged.connect(self._on_colormap_changed)
-        tool_layout.addWidget(self.colormap_combo)
-
-        # Color Scale Limits (Vmin, Vmax, Auto)
         tool_layout.addSpacing(15)
-        tool_layout.addWidget(QLabel("C-Min:"))
-        self.vmin_spinbox = QDoubleSpinBox()
-        self.vmin_spinbox.setRange(-1e9, 1e9)
-        self.vmin_spinbox.setDecimals(2)
-        self.vmin_spinbox.setFixedWidth(75)
-        self.vmin_spinbox.valueChanged.connect(self._on_clim_changed)
-        tool_layout.addWidget(self.vmin_spinbox)
-
-        tool_layout.addWidget(QLabel("C-Max:"))
-        self.vmax_spinbox = QDoubleSpinBox()
-        self.vmax_spinbox.setRange(-1e9, 1e9)
-        self.vmax_spinbox.setDecimals(2)
-        self.vmax_spinbox.setFixedWidth(75)
-        self.vmax_spinbox.valueChanged.connect(self._on_clim_changed)
-        tool_layout.addWidget(self.vmax_spinbox)
-
-        self.auto_clim_btn = QPushButton("Auto Scale")
-        self.auto_clim_btn.setToolTip("Reset color scale to auto min/max of current frame")
-        self.auto_clim_btn.clicked.connect(self._reset_clim_auto)
-        tool_layout.addWidget(self.auto_clim_btn)
+        # Single compact Resample dropdown button (1/2, 1/3, 1/4, 2x, 3x, 4x)
+        self.resample_combo = QComboBox()
+        self.resample_combo.setToolTip("Resample spatial resolution (Downscale: 1/2, 1/3, 1/4 | Upscale: 2x, 3x, 4x)")
+        self.resample_combo.addItems([
+            "Resample ▾",
+            "1/2",
+            "1/3",
+            "1/4",
+            "2x",
+            "3x",
+            "4x"
+        ])
+        self.resample_combo.activated[str].connect(self.apply_spatial_resample)
+        tool_layout.addWidget(self.resample_combo)
 
         tool_layout.addStretch()
         left_layout.addWidget(tool_group)
@@ -306,6 +287,49 @@ class UnmixerWindow(QMainWindow):
         self.ax_cbar.set_yticks([])
 
         image_layout.addWidget(self.image_canvas)
+
+        # Built-in Matplotlib Zoom & Pan navigation toolbar for spatial view
+        self.nav_toolbar = NavigationToolbar(self.image_canvas, self)
+        image_layout.addWidget(self.nav_toolbar)
+
+        # Bottom Color & Scale Controls bar directly under spatial image canvas
+        color_bar_layout = QHBoxLayout()
+        color_bar_layout.setContentsMargins(4, 2, 4, 2)
+        color_bar_layout.addWidget(QLabel("Colormap:"))
+        self.colormap_combo = QComboBox()
+        self.colormap_combo.addItems([
+            'gray', 'viridis', 'plasma', 'inferno', 'magma', 'cividis',
+            'jet', 'hot', 'cool', 'spring', 'summer', 'autumn', 'winter',
+            'bone', 'copper', 'red', 'green', 'blue'
+        ])
+        self.colormap_combo.setCurrentText('gray')
+        self.colormap_combo.currentTextChanged.connect(self._on_colormap_changed)
+        color_bar_layout.addWidget(self.colormap_combo)
+
+        color_bar_layout.addSpacing(15)
+        color_bar_layout.addWidget(QLabel("C-Min:"))
+        self.vmin_spinbox = QDoubleSpinBox()
+        self.vmin_spinbox.setRange(-1e9, 1e9)
+        self.vmin_spinbox.setDecimals(2)
+        self.vmin_spinbox.setFixedWidth(75)
+        self.vmin_spinbox.valueChanged.connect(self._on_clim_changed)
+        color_bar_layout.addWidget(self.vmin_spinbox)
+
+        color_bar_layout.addWidget(QLabel("C-Max:"))
+        self.vmax_spinbox = QDoubleSpinBox()
+        self.vmax_spinbox.setRange(-1e9, 1e9)
+        self.vmax_spinbox.setDecimals(2)
+        self.vmax_spinbox.setFixedWidth(75)
+        self.vmax_spinbox.valueChanged.connect(self._on_clim_changed)
+        color_bar_layout.addWidget(self.vmax_spinbox)
+
+        self.auto_clim_btn = QPushButton("Auto Scale")
+        self.auto_clim_btn.setToolTip("Reset color scale to auto min/max of current frame")
+        self.auto_clim_btn.clicked.connect(self._reset_clim_auto)
+        color_bar_layout.addWidget(self.auto_clim_btn)
+
+        color_bar_layout.addStretch()
+        image_layout.addLayout(color_bar_layout)
         left_layout.addWidget(image_group)
 
         # Spectral Frame Slider Group
@@ -869,6 +893,79 @@ class UnmixerWindow(QMainWindow):
         self.clim = None
         if self.hypercube is not None:
             self.display_frame(self.current_frame)
+
+    def apply_spatial_resample(self, factor_str=None):
+        """Downscale (1/2, 1/3, 1/4 via block averaging) or Upscale (2x, 3x, 4x via bilinear interpolation)."""
+        if self.hypercube is None:
+            QMessageBox.warning(self, "Warning", "Please load a dataset first.")
+            if hasattr(self, 'resample_combo'):
+                self.resample_combo.setCurrentIndex(0)
+            return
+
+        if not factor_str or factor_str == "Resample ▾":
+            factor_str = self.resample_combo.currentText()
+
+        if factor_str == "Resample ▾":
+            return
+
+        # Reset combo box index back to 'Resample ▾' title without infinite signals
+        self.resample_combo.blockSignals(True)
+        self.resample_combo.setCurrentIndex(0)
+        self.resample_combo.blockSignals(False)
+
+        H, W, B = self.hypercube.shape
+
+        if "1/2" in factor_str:
+            k = 2
+            mode = "downscale"
+        elif "1/3" in factor_str:
+            k = 3
+            mode = "downscale"
+        elif "1/4" in factor_str:
+            k = 4
+            mode = "downscale"
+        elif "2x" in factor_str:
+            k = 2
+            mode = "upscale"
+        elif "3x" in factor_str:
+            k = 3
+            mode = "upscale"
+        elif "4x" in factor_str:
+            k = 4
+            mode = "upscale"
+        else:
+            return
+
+        try:
+            if mode == "downscale":
+                H_new = H // k
+                W_new = W // k
+                if H_new < 2 or W_new < 2:
+                    QMessageBox.warning(self, "Warning", f"Image dimensions ({H}x{W}) are too small to downscale by 1/{k}.")
+                    return
+                cube_cropped = self.hypercube[:H_new * k, :W_new * k, :]
+                new_cube = cube_cropped.reshape(H_new, k, W_new, k, B).mean(axis=(1, 3))
+                msg = f"Downscaled image by 1/{k} ({H}x{W} -> {H_new}x{W_new})"
+
+            else:  # upscale
+                try:
+                    from scipy.ndimage import zoom
+                    new_cube = zoom(self.hypercube, (k, k, 1), order=1)
+                except ImportError:
+                    new_cube = np.repeat(np.repeat(self.hypercube, k, axis=0), k, axis=1)
+                H_new, W_new = new_cube.shape[:2]
+                msg = f"Upscaled image by {k}x ({H}x{W} -> {H_new}x{W_new})"
+
+            self.hypercube = new_cube.astype(np.float32)
+            self.clear_selection()
+            self.spectra_list = []
+            self.update_checkbox_list()
+            self._on_data_loaded()
+            self.statusBar().showMessage(msg)
+            QMessageBox.information(self, "Spatial Resample", msg)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to resample image:\n{e}")
 
     def _on_canvas_press(self, event):
         if event.inaxes != self.ax_main or self.hypercube is None:

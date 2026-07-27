@@ -28,7 +28,7 @@ from PyQt5.QtGui import QImage, QPixmap, QIcon, QPen, QBrush, QColor
 import matplotlib
 matplotlib.use('Qt5Agg')
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 from matplotlib.patches import Circle, Rectangle
 from matplotlib.colors import Normalize
@@ -224,6 +224,50 @@ class HyperViewer(QMainWindow):
         self.ax_cbar.set_yticks([])
         
         image_layout.addWidget(self.image_canvas)
+
+        # Built-in Matplotlib Zoom & Pan navigation toolbar for spatial view
+        self.nav_toolbar = NavigationToolbar(self.image_canvas, self)
+        image_layout.addWidget(self.nav_toolbar)
+
+        # Bottom Color & Scale Controls bar directly under spatial image canvas
+        color_bar_layout = QHBoxLayout()
+        color_bar_layout.setContentsMargins(4, 2, 4, 2)
+        color_bar_layout.addWidget(QLabel("Colormap:"))
+        self.cmap_combo = QComboBox()
+        self.cmap_combo.addItems([
+            'gray', 'viridis', 'plasma', 'inferno', 'magma', 'cividis',
+            'jet', 'hot', 'cool', 'spring', 'summer', 'autumn', 'winter',
+            'bone', 'copper', 'red', 'green', 'blue'
+        ])
+        self.cmap_combo.setCurrentText('gray')
+        self.cmap_combo.currentTextChanged.connect(self.on_colormap_changed)
+        color_bar_layout.addWidget(self.cmap_combo)
+
+        color_bar_layout.addSpacing(15)
+        color_bar_layout.addWidget(QLabel("C-Min:"))
+        self.vmin_spinbox = QDoubleSpinBox()
+        self.vmin_spinbox.setRange(-1e9, 1e9)
+        self.vmin_spinbox.setDecimals(2)
+        self.vmin_spinbox.setFixedWidth(75)
+        self.vmin_spinbox.valueChanged.connect(self.on_clim_changed)
+        color_bar_layout.addWidget(self.vmin_spinbox)
+
+        color_bar_layout.addWidget(QLabel("C-Max:"))
+        self.vmax_spinbox = QDoubleSpinBox()
+        self.vmax_spinbox.setRange(-1e9, 1e9)
+        self.vmax_spinbox.setDecimals(2)
+        self.vmax_spinbox.setFixedWidth(75)
+        self.vmax_spinbox.valueChanged.connect(self.on_clim_changed)
+        color_bar_layout.addWidget(self.vmax_spinbox)
+
+        self.auto_clim_btn = QPushButton("Auto Scale")
+        self.auto_clim_btn.setToolTip("Reset color scale to auto min/max of current frame")
+        self.auto_clim_btn.clicked.connect(self.reset_clim_auto)
+        color_bar_layout.addWidget(self.auto_clim_btn)
+
+        color_bar_layout.addStretch()
+        image_layout.addLayout(color_bar_layout)
+
         left_layout.addWidget(image_group)
         
         # Slider for spectral frames
@@ -432,69 +476,24 @@ class HyperViewer(QMainWindow):
         self.size_spinbox.setValue(10)
         self.size_spinbox.setSuffix(" px")
         tool_layout.addWidget(self.size_spinbox)
-
+        
         # Separator
         tool_layout.addSpacing(20)
 
-        # Colormap selector
-        cmap_label = QLabel("Colormap:")
-        tool_layout.addWidget(cmap_label)
-
-        self.cmap_combo = QComboBox()
-        self.cmap_combo.addItems([
-            'gray', 'viridis', 'plasma', 'inferno', 'magma', 'cividis',
-            'jet', 'hot', 'cool', 'spring', 'summer', 'autumn', 'winter',
-            'bone', 'copper', 'red', 'green', 'blue'
-        ])
-        self.cmap_combo.setCurrentText('gray')
-        self.cmap_combo.currentTextChanged.connect(self.on_colormap_changed)
-        tool_layout.addWidget(self.cmap_combo)
-
-        # Color Scale Limits (Vmin, Vmax, Auto)
-        tool_layout.addSpacing(15)
-        tool_layout.addWidget(QLabel("C-Min:"))
-        self.vmin_spinbox = QDoubleSpinBox()
-        self.vmin_spinbox.setRange(-1e9, 1e9)
-        self.vmin_spinbox.setDecimals(2)
-        self.vmin_spinbox.setFixedWidth(75)
-        self.vmin_spinbox.valueChanged.connect(self.on_clim_changed)
-        tool_layout.addWidget(self.vmin_spinbox)
-
-        tool_layout.addWidget(QLabel("C-Max:"))
-        self.vmax_spinbox = QDoubleSpinBox()
-        self.vmax_spinbox.setRange(-1e9, 1e9)
-        self.vmax_spinbox.setDecimals(2)
-        self.vmax_spinbox.setFixedWidth(75)
-        self.vmax_spinbox.valueChanged.connect(self.on_clim_changed)
-        tool_layout.addWidget(self.vmax_spinbox)
-
-        self.auto_clim_btn = QPushButton("Auto Scale")
-        self.auto_clim_btn.setToolTip("Reset color scale to auto min/max of current frame")
-        self.auto_clim_btn.clicked.connect(self.reset_clim_auto)
-        tool_layout.addWidget(self.auto_clim_btn)
-
-        # Separator
-        tool_layout.addSpacing(20)
-
-        # Spatial Resample controls (Downscale / Upscale)
-        resample_label = QLabel("Resample:")
-        tool_layout.addWidget(resample_label)
-
+        # Single compact Resample dropdown button (1/2, 1/3, 1/4, 2x, 3x, 4x)
         self.resample_combo = QComboBox()
+        self.resample_combo.setToolTip("Resample spatial resolution (Downscale: 1/2, 1/3, 1/4 | Upscale: 2x, 3x, 4x)")
         self.resample_combo.addItems([
-            "1/2 (50% Downscale)",
-            "1/3 (33% Downscale)",
-            "1/4 (25% Downscale)",
-            "2x (200% Upscale)",
-            "3x (300% Upscale)",
-            "4x (400% Upscale)"
+            "Resample ▾",
+            "1/2",
+            "1/3",
+            "1/4",
+            "2x",
+            "3x",
+            "4x"
         ])
+        self.resample_combo.activated[str].connect(self.apply_spatial_resample)
         tool_layout.addWidget(self.resample_combo)
-
-        self.resample_btn = QPushButton("Apply Resample")
-        self.resample_btn.setToolTip("Downscale (block average) or Upscale (interpolate) spatial dimensions")
-        self.resample_btn.clicked.connect(self.apply_spatial_resample)
-        tool_layout.addWidget(self.resample_btn)
 
         layout.addWidget(tool_group)
         
@@ -544,13 +543,25 @@ class HyperViewer(QMainWindow):
             self.ax_main.figure.canvas.mpl_connect('button_release_event', self.on_canvas_release)
             self.ax_main.figure.canvas.mpl_connect('motion_notify_event', self.on_canvas_motion)
         
-    def apply_spatial_resample(self):
+    def apply_spatial_resample(self, factor_str=None):
         """Downscale (1/2, 1/3, 1/4 via block averaging) or Upscale (2x, 3x, 4x via bilinear interpolation)."""
         if self.hypercube is None:
             QMessageBox.warning(self, "Warning", "Please load a dataset first.")
+            if hasattr(self, 'resample_combo'):
+                self.resample_combo.setCurrentIndex(0)
             return
 
-        factor_str = self.resample_combo.currentText()
+        if not factor_str or factor_str == "Resample ▾":
+            factor_str = self.resample_combo.currentText()
+
+        if factor_str == "Resample ▾":
+            return
+
+        # Reset combo box index back to 'Resample ▾' title without infinite signals
+        self.resample_combo.blockSignals(True)
+        self.resample_combo.setCurrentIndex(0)
+        self.resample_combo.blockSignals(False)
+
         H, W, B = self.hypercube.shape
 
         if "1/2" in factor_str:

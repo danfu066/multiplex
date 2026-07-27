@@ -185,20 +185,25 @@ def _poly_design(H, W, deg):
     return np.stack([c.ravel() for c in cols], axis=1)
 
 
-def resolve_orders(w, deg=3, clip=0.35, n_iter=6):
+def resolve_orders(w, deg=3, clip=0.35, n_iter=6, A=None):
     """
     Remove integer-wave order errors from one retardance map (in waves), using
     spatial continuity.
 
-    Subsamples pixel grid when image size > 50,000 for 100x speedup while preserving
+    Subsamples pixel grid when image size > 20,000 for 100x speedup while preserving
     exact polynomial surface fitting accuracy.
     """
     H, W = w.shape
-    A = _poly_design(H, W, deg)
+    if A is None:
+        A = _poly_design(H, W, deg)
     z = w.ravel()
 
-    # Subsample pixels for least-squares solve if total pixel count exceeds 50k
-    stride = max(1, z.size // 50000)
+    # If peak-to-peak retardance variation across the frame is small (<0.3 waves), no order jumps exist
+    if np.ptp(z) < 0.3:
+        return w, np.zeros_like(w)
+
+    # Subsample pixels for least-squares solve if total pixel count exceeds 20k
+    stride = max(1, z.size // 20000)
 
     keep = np.ones(z.size, dtype=bool)
     coef = None
@@ -290,8 +295,9 @@ def convert_to_opd(cube_hwn, wavelength_nm, convention="dark_at_zero",
     waves = waves.reshape(N, H, W)
 
     if do_resolve:
+        A_matrix = _poly_design(H, W, deg=3)
         for k in range(N):
-            waves[k], _ = resolve_orders(waves[k])
+            waves[k], _ = resolve_orders(waves[k], A=A_matrix)
             if progress is not None and not progress(0.75 + 0.25 * (k + 1) / N):
                 return None
         waves = np.minimum.accumulate(waves, axis=0)
