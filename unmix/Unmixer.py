@@ -265,26 +265,18 @@ class UnmixerWindow(QMainWindow):
         self.image_canvas.mpl_connect('button_press_event', self._on_canvas_press)
         self.image_canvas.mpl_connect('button_release_event', self._on_canvas_release)
         self.image_canvas.mpl_connect('motion_notify_event', self._on_canvas_motion)
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-        gs = self.image_fig.add_gridspec(
-            3, 4,
-            width_ratios=[0.18, 1.0, 0.03, 0.04],
-            height_ratios=[0.18, 1.0, 0.04],
-            left=0.06, right=0.94, bottom=0.06, top=0.94,
-            hspace=0.08, wspace=0.08
-        )
-
-        self.ax_main = self.image_fig.add_subplot(gs[1, 1])
-        self.ax_x_spectral = self.image_fig.add_subplot(gs[0, 1], sharex=self.ax_main)  # XZ view shared X with main
-        self.ax_y_spectral = self.image_fig.add_subplot(gs[1, 0], sharey=self.ax_main)  # YZ view shared Y with main
-        self.ax_cbar = self.image_fig.add_subplot(gs[1, 2])
+        self.ax_main = self.image_fig.add_subplot(111)
+        divider = make_axes_locatable(self.ax_main)
+        self.ax_x_spectral = divider.append_axes("top", size="18%", pad=0.1, sharex=self.ax_main)
+        self.ax_y_spectral = divider.append_axes("left", size="18%", pad=0.1, sharey=self.ax_main)
+        self.ax_cbar = divider.append_axes("right", size="3%", pad=0.1)
 
         self.ax_x_spectral.tick_params(bottom=False, labelbottom=False)
         self.ax_y_spectral.tick_params(left=False, labelleft=False)
         self.ax_cbar.set_xticks([])
         self.ax_cbar.set_yticks([])
-
-        self.ax_main.set_title("Spatial View")
 
         image_layout.addWidget(self.image_canvas)
         left_layout.addWidget(image_group)
@@ -741,16 +733,16 @@ class UnmixerWindow(QMainWindow):
         self.ax_main.clear()
         im = self.ax_main.imshow(self.hypercube[:, :, frame_idx], cmap=self.current_colormap,
                                 interpolation='nearest', extent=[-0.5, width - 0.5, height - 0.5, -0.5])
-        self.ax_main.set_title(f"Spatial View - Band {frame_idx}")
         self.ax_main.set_xlim(-0.5, width - 0.5)
         self.ax_main.set_ylim(height - 0.5, -0.5)
         self.im_handle = im
 
-        # Draw crosshairs
+        # Draw crosshairs only for point or default navigation
         cy = max(0, min(self.crosshair_y or height // 2, height - 1))
         cx = max(0, min(self.crosshair_x or width // 2, width - 1))
-        self.ax_main.axhline(cy, color='red', linestyle='--', linewidth=0.8, alpha=0.7)
-        self.ax_main.axvline(cx, color='red', linestyle='--', linewidth=0.8, alpha=0.7)
+        if self.selection_tool in (None, 'point'):
+            self.ax_main.axhline(cy, color='red', linestyle='--', linewidth=0.8, alpha=0.7)
+            self.ax_main.axvline(cx, color='red', linestyle='--', linewidth=0.8, alpha=0.7)
 
         # Colorbar
         if self.ax_cbar is not None and self.ax_cbar in self.image_fig.axes:
@@ -824,7 +816,7 @@ class UnmixerWindow(QMainWindow):
                 mask = np.zeros((H, W), dtype=bool)
                 mask[y, x] = True
                 self.current_selection = {
-                    'type': 'point', 'x': x, 'y': y,
+                    'type': 'point', 'x': x, 'y': y, 'coords': (float(x), float(y)),
                     'spectrum': spectrum, 'mask': mask,
                 }
                 self._plot_spectrum(spectrum)
@@ -873,16 +865,19 @@ class UnmixerWindow(QMainWindow):
         H, W, L = self.hypercube.shape
         mask = np.zeros((H, W), dtype=bool)
 
+        radius_val = None
+        size_val = None
+
         if self.selection_tool == 'square':
-            size = max(abs(x1 - x0), abs(y1 - y0))
-            half_size = size / 2.0
+            size_val = float(max(1.0, max(abs(x1 - x0), abs(y1 - y0))))
+            half_size = size_val / 2.0
             x_min, x_max = max(0, int(round(x0 - half_size))), min(W - 1, int(round(x0 + half_size)))
             y_min, y_max = max(0, int(round(y0 - half_size))), min(H - 1, int(round(y0 + half_size)))
             mask[y_min:y_max+1, x_min:x_max+1] = True
         elif self.selection_tool == 'circle':
-            r = np.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
+            radius_val = float(max(1.0, np.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)))
             yy, xx = np.ogrid[:H, :W]
-            mask[(xx - x0) ** 2 + (yy - y0) ** 2 <= r ** 2] = True
+            mask[(xx - x0) ** 2 + (yy - y0) ** 2 <= radius_val ** 2] = True
 
         if mask.any():
             spectra = self.hypercube[mask]
@@ -890,6 +885,9 @@ class UnmixerWindow(QMainWindow):
             std = spectra.std(axis=0)
             self.current_selection = {
                 'type': self.selection_tool,
+                'coords': (float(x0), float(y0)),
+                'radius': radius_val,
+                'size': size_val,
                 'spectrum': mean_spectrum,
                 'std': std,
                 'mask': mask,
@@ -906,12 +904,52 @@ class UnmixerWindow(QMainWindow):
             self.current_patch = None
         self.display_frame(self.current_frame)
 
+    def _align_side_views(self, event=None):
+        if not hasattr(self, 'ax_main') or self.ax_main is None or self.ax_x_spectral is None or self.ax_y_spectral is None:
+            return
+        pos_main = self.ax_main.get_position()
+        pos_x = self.ax_x_spectral.get_position()
+        pos_y = self.ax_y_spectral.get_position()
+
+        # Align XZ view left edge and width to match main spatial image
+        self.ax_x_spectral.set_position([pos_main.x0, pos_x.y0, pos_main.width, pos_x.height])
+        # Align YZ view bottom edge and height to match main spatial image
+        self.ax_y_spectral.set_position([pos_y.x0, pos_main.y0, pos_y.width, pos_main.height])
+
     def _redraw_selections(self):
-        if self.current_selection and 'mask' in self.current_selection:
-            mask = self.current_selection['mask']
-            ys, xs = np.where(mask)
-            if len(xs) > 0 and len(ys) > 0:
-                self.ax_main.plot(xs, ys, 'r.', markersize=2, alpha=0.5)
+        """Redraw open selection markers (+ for point, O for circle, □ for square) for all saved and active selections."""
+        # 1. Draw saved selections from self.spectra_list
+        for sdata in self.spectra_list:
+            if not sdata.visible or sdata.coords is None:
+                continue
+            cx, cy = sdata.coords
+            c = sdata.color
+            if sdata.selection_type == 'point':
+                self.ax_main.plot(cx, cy, '+', color=c, markersize=10, markeredgewidth=2)
+            elif sdata.selection_type == 'circle' and hasattr(sdata, 'radius') and sdata.radius:
+                circle = Circle((cx, cy), sdata.radius, fill=False, edgecolor=c, linewidth=2)
+                self.ax_main.add_patch(circle)
+            elif sdata.selection_type == 'square' and hasattr(sdata, 'size') and sdata.size:
+                half = sdata.size / 2.0
+                rect = Rectangle((cx - half, cy - half), sdata.size, sdata.size,
+                                 fill=False, edgecolor=c, linewidth=2)
+                self.ax_main.add_patch(rect)
+
+        # 2. Draw active current selection
+        if self.current_selection and 'coords' in self.current_selection:
+            sel = self.current_selection
+            stype = sel.get('type', 'point')
+            cx, cy = sel['coords']
+            if stype == 'point':
+                self.ax_main.plot(cx, cy, '+', color='red', markersize=10, markeredgewidth=2)
+            elif stype == 'circle' and 'radius' in sel:
+                circle = Circle((cx, cy), sel['radius'], fill=False, edgecolor='green', linewidth=2, linestyle='--')
+                self.ax_main.add_patch(circle)
+            elif stype == 'square' and 'size' in sel:
+                half = sel['size'] / 2.0
+                rect = Rectangle((cx - half, cy - half), sel['size'], sel['size'],
+                                 fill=False, edgecolor='blue', linewidth=2, linestyle='--')
+                self.ax_main.add_patch(rect)
 
     def clear_selection(self):
         self.current_selection = None
@@ -1051,18 +1089,26 @@ class UnmixerWindow(QMainWindow):
     def add_current_spectrum(self):
         if self.current_selection is None or 'spectrum' not in self.current_selection:
             return
-        spec = self.current_selection['spectrum']
-        std = self.current_selection.get('std', None)
-        lbl = f"Spectrum {len(self.spectra_list) + 1} ({self.current_selection.get('type', 'point')})"
+        sel = self.current_selection
+        spec = sel['spectrum']
+        std = sel.get('std', None)
+        stype = sel.get('type', 'point')
+        lbl = f"Spectrum {len(self.spectra_list) + 1} ({stype})"
         colors = ['blue', 'green', 'red', 'cyan', 'magenta', 'yellow', 'orange', 'purple']
         color = colors[len(self.spectra_list) % len(colors)]
 
-        sdata = SpectrumData(spec, std=std, label=lbl, color=color,
-                             selection_type=self.current_selection.get('type', 'point'))
+        sdata = SpectrumData(
+            spec, std=std, label=lbl, color=color,
+            selection_type=stype, coords=sel.get('coords'), mask=sel.get('mask')
+        )
+        sdata.radius = sel.get('radius')
+        sdata.size = sel.get('size')
         self.spectra_list.append(sdata)
         self.update_checkbox_list()
         self.update_spectrum_plot()
         self.autoscale_axes()
+        if self.hypercube is not None:
+            self.display_frame(self.current_frame)
 
     def update_checkbox_list(self):
         # Clear existing list
@@ -1105,19 +1151,45 @@ class UnmixerWindow(QMainWindow):
     def toggle_spectrum_visibility(self, index):
         if 0 <= index < len(self.spectra_list):
             self.spectra_list[index].visible = not self.spectra_list[index].visible
-            self._plot_all_spectra()
+            self.update_spectrum_plot()
+            if self.hypercube is not None:
+                self.display_frame(self.current_frame)
 
     def delete_single_spectrum(self, index):
         if 0 <= index < len(self.spectra_list):
             self.spectra_list.pop(index)
             self.update_checkbox_list()
-            self._plot_all_spectra()
+            self.update_spectrum_plot()
+            self.autoscale_axes()
+            if self.hypercube is not None:
+                self.display_frame(self.current_frame)
 
     def delete_selected_spectrum(self):
-        if self.spectra_list:
-            self.spectra_list.pop()
-            self.update_checkbox_list()
-            self._plot_all_spectra()
+        """Delete checked spectra, or the last spectrum if none checked."""
+        if not self.spectra_list:
+            return
+
+        indices_to_delete = []
+        for i in range(self.checkbox_layout.count()):
+            item = self.checkbox_layout.itemAt(i)
+            if item and item.layout():
+                check_item = item.layout().itemAt(0)
+                if check_item and check_item.widget() and isinstance(check_item.widget(), QCheckBox):
+                    if check_item.widget().isChecked():
+                        indices_to_delete.append(i)
+
+        if not indices_to_delete:
+            indices_to_delete = [len(self.spectra_list) - 1]
+
+        for idx in sorted(indices_to_delete, reverse=True):
+            if 0 <= idx < len(self.spectra_list):
+                self.spectra_list.pop(idx)
+
+        self.update_checkbox_list()
+        self.update_spectrum_plot()
+        self.autoscale_axes()
+        if self.hypercube is not None:
+            self.display_frame(self.current_frame)
 
     def set_background_spectrum(self):
         bg_id = self.bg_radio_group.checkedId()

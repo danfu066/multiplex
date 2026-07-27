@@ -203,13 +203,12 @@ class HyperViewer(QMainWindow):
         self.image_canvas = FigureCanvas(self.image_fig)
 
         # Main axes for spatial view
-        gs = self.image_fig.add_gridspec(3, 4, width_ratios=[0.2, 1, 0.03, 0.05],
-                                         height_ratios=[0.2, 1, 0.05],
-                                         left=0.05, right=0.95, bottom=0.05, top=0.95)
-        self.ax_main = self.image_fig.add_subplot(gs[1, 1])
-        self.ax_x_spectral = self.image_fig.add_subplot(gs[0, 1])  # Removed sharex
-        self.ax_y_spectral = self.image_fig.add_subplot(gs[1, 0])  # Removed sharey
-        self.ax_cbar = self.image_fig.add_subplot(gs[1, 2])
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
+        self.ax_main = self.image_fig.add_subplot(111)
+        divider = make_axes_locatable(self.ax_main)
+        self.ax_x_spectral = divider.append_axes("top", size="18%", pad=0.1, sharex=self.ax_main)
+        self.ax_y_spectral = divider.append_axes("left", size="18%", pad=0.1, sharey=self.ax_main)
+        self.ax_cbar = divider.append_axes("right", size="3%", pad=0.1)
 
         # Hide tick labels for side views
         plt.setp(self.ax_x_spectral.get_xticklabels(), visible=False)
@@ -220,10 +219,6 @@ class HyperViewer(QMainWindow):
         # Hide colorbar axis ticks
         self.ax_cbar.set_xticks([])
         self.ax_cbar.set_yticks([])
-
-        # Set labels
-        self.ax_x_spectral.set_title("X Spectral Average")
-        self.ax_y_spectral.set_title("Y Spectral Average", rotation=90)
         
         image_layout.addWidget(self.image_canvas)
         left_layout.addWidget(image_group)
@@ -600,6 +595,18 @@ class HyperViewer(QMainWindow):
         # Reset selection
         self.clear_selection()
         
+    def _align_side_views(self, event=None):
+        if not hasattr(self, 'ax_main') or self.ax_main is None or self.ax_x_spectral is None or self.ax_y_spectral is None:
+            return
+        pos_main = self.ax_main.get_position()
+        pos_x = self.ax_x_spectral.get_position()
+        pos_y = self.ax_y_spectral.get_position()
+
+        # Align XZ view left edge and width to match main spatial image
+        self.ax_x_spectral.set_position([pos_main.x0, pos_x.y0, pos_main.width, pos_x.height])
+        # Align YZ view bottom edge and height to match main spatial image
+        self.ax_y_spectral.set_position([pos_y.x0, pos_main.y0, pos_y.width, pos_main.height])
+
     def display_frame(self, frame_idx):
         """Display a specific spectral frame"""
         if self.hypercube is None:
@@ -609,46 +616,36 @@ class HyperViewer(QMainWindow):
 
         # Main spatial view
         self.ax_main.clear()
-        im = self.ax_main.imshow(self.hypercube[:, :, frame_idx], cmap=self.current_colormap, interpolation='nearest')
-        self.ax_main.set_title(f"Spatial View - Band {frame_idx}")
-        self.ax_main.set_xlabel("X (pixels)")
-        self.ax_main.set_ylabel("Y (pixels)")
-        self.ax_main.set_xlim(0, width - 1)
-        self.ax_main.set_ylim(height - 1, 0)
+        im = self.ax_main.imshow(self.hypercube[:, :, frame_idx], cmap=self.current_colormap,
+                                interpolation='nearest', extent=[-0.5, width - 0.5, height - 0.5, -0.5])
+        self.ax_main.set_xlim(-0.5, width - 0.5)
+        self.ax_main.set_ylim(height - 0.5, -0.5)
 
         # Update colorbar
         self._update_colorbar(im)
 
-        # X spectral view: horizontal cross-section at crosshair_y, showing X (horizontal) vs spectral bands (vertical)
-        # Shape: (width, bands) - displayed with X horizontal, bands vertical (down)
+        # X spectral view: horizontal cross-section at crosshair_y
         self.ax_x_spectral.clear()
-        # Ensure crosshair_y is within bounds
         cy = max(0, min(self.crosshair_y, height - 1))
-        x_spectral = self.hypercube[cy, :, :]  # Single row at crosshair_y: shape (width, bands)
+        x_spectral = self.hypercube[cy, :, :]
         self.ax_x_spectral.imshow(x_spectral.T, cmap='gray', aspect='auto',
-                                   extent=[0, width, bands, 0])
-        self.ax_x_spectral.set_title(f"X Spectral (Y={cy})")
-        self.ax_x_spectral.set_ylabel("Spectral Band")
-        self.ax_x_spectral.set_xlim(0, width - 1)
-        self.ax_x_spectral.set_ylim(bands - 1, 0)
+                                   extent=[-0.5, width - 0.5, bands - 0.5, -0.5])
+        self.ax_x_spectral.set_xlim(-0.5, width - 0.5)
+        self.ax_x_spectral.set_ylim(bands - 0.5, -0.5)
         plt.setp(self.ax_x_spectral.get_xticklabels(), visible=False)
 
-        # Y spectral view: vertical cross-section at crosshair_x, showing Y (vertical) vs spectral bands (horizontal)
-        # Shape: (height, bands) - displayed with bands horizontal, Y vertical
+        # Y spectral view: vertical cross-section at crosshair_x
         self.ax_y_spectral.clear()
-        # Ensure crosshair_x is within bounds
         cx = max(0, min(self.crosshair_x, width - 1))
-        y_spectral = self.hypercube[:, cx, :]  # Single column at crosshair_x: shape (height, bands)
+        y_spectral = self.hypercube[:, cx, :]
         self.ax_y_spectral.imshow(y_spectral, cmap='gray', aspect='auto',
-                                   extent=[0, bands, height - 1, 0])
-        self.ax_y_spectral.set_title(f"Y Spectral (X={cx})")
-        self.ax_y_spectral.set_xlabel("Spectral Band")
-        self.ax_y_spectral.set_xlim(0, bands - 1)
-        self.ax_y_spectral.set_ylim(height - 1, 0)
+                                   extent=[-0.5, bands - 0.5, height - 0.5, -0.5])
+        self.ax_y_spectral.set_xlim(-0.5, bands - 0.5)
+        self.ax_y_spectral.set_ylim(height - 0.5, -0.5)
         plt.setp(self.ax_y_spectral.get_yticklabels(), visible=False)
 
         # Redraw all selections - reset overlay patches list since axes was cleared
-        self.selection_overlay.patches = []  # Clear internal list since axes.clear() removed the artists
+        self.selection_overlay.patches = []
         self.redraw_all_selections()
 
         self.image_canvas.draw_idle()
@@ -1211,6 +1208,8 @@ class HyperViewer(QMainWindow):
 
         self.update_spectrum_plot()
         self.update_checkbox_list()
+        if self.hypercube is not None:
+            self.display_frame(self.current_frame)
 
         # Update button states
         if len(self.spectra_list) == 0:
@@ -1234,6 +1233,8 @@ class HyperViewer(QMainWindow):
         self.spectra_list.pop(index)
         self.update_spectrum_plot()
         self.update_checkbox_list()
+        if self.hypercube is not None:
+            self.display_frame(self.current_frame)
 
         # Update button states
         if len(self.spectra_list) == 0:
