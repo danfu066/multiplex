@@ -275,8 +275,8 @@ class UnmixerWindow(QMainWindow):
         )
 
         self.ax_main = self.image_fig.add_subplot(gs[1, 1])
-        self.ax_x_spectral = self.image_fig.add_subplot(gs[0, 1])  # XZ view
-        self.ax_y_spectral = self.image_fig.add_subplot(gs[1, 0])  # YZ view
+        self.ax_x_spectral = self.image_fig.add_subplot(gs[0, 1], sharex=self.ax_main)  # XZ view shared X with main
+        self.ax_y_spectral = self.image_fig.add_subplot(gs[1, 0], sharey=self.ax_main)  # YZ view shared Y with main
         self.ax_cbar = self.image_fig.add_subplot(gs[1, 2])
 
         self.ax_x_spectral.tick_params(bottom=False, labelbottom=False)
@@ -739,10 +739,11 @@ class UnmixerWindow(QMainWindow):
 
         # Main Spatial View
         self.ax_main.clear()
-        im = self.ax_main.imshow(self.hypercube[:, :, frame_idx], cmap=self.current_colormap, interpolation='nearest')
+        im = self.ax_main.imshow(self.hypercube[:, :, frame_idx], cmap=self.current_colormap,
+                                interpolation='nearest', extent=[-0.5, width - 0.5, height - 0.5, -0.5])
         self.ax_main.set_title(f"Spatial View - Band {frame_idx}")
-        self.ax_main.set_xlim(0, width - 1)
-        self.ax_main.set_ylim(height - 1, 0)
+        self.ax_main.set_xlim(-0.5, width - 0.5)
+        self.ax_main.set_ylim(height - 0.5, -0.5)
         self.im_handle = im
 
         # Draw crosshairs
@@ -761,17 +762,17 @@ class UnmixerWindow(QMainWindow):
         # Update XZ Spectral View (Top): row at cy -> shape (width, bands)
         self.ax_x_spectral.clear()
         x_spectral = self.hypercube[cy, :, :]
-        self.ax_x_spectral.imshow(x_spectral.T, cmap='gray', aspect='auto', extent=[0, width - 1, bands - 1, 0])
-        self.ax_x_spectral.set_xlim(0, width - 1)
-        self.ax_x_spectral.set_ylim(bands - 1, 0)
+        self.ax_x_spectral.imshow(x_spectral.T, cmap='gray', aspect='auto', extent=[-0.5, width - 0.5, bands - 0.5, -0.5])
+        self.ax_x_spectral.set_xlim(-0.5, width - 0.5)
+        self.ax_x_spectral.set_ylim(bands - 0.5, -0.5)
         self.ax_x_spectral.tick_params(bottom=False, labelbottom=False)
 
         # Update YZ Spectral View (Left): col at cx -> shape (height, bands)
         self.ax_y_spectral.clear()
         y_spectral = self.hypercube[:, cx, :]
-        self.ax_y_spectral.imshow(y_spectral, cmap='gray', aspect='auto', extent=[0, bands - 1, height - 1, 0])
-        self.ax_y_spectral.set_xlim(0, bands - 1)
-        self.ax_y_spectral.set_ylim(height - 1, 0)
+        self.ax_y_spectral.imshow(y_spectral, cmap='gray', aspect='auto', extent=[-0.5, bands - 0.5, height - 0.5, -0.5])
+        self.ax_y_spectral.set_xlim(-0.5, bands - 0.5)
+        self.ax_y_spectral.set_ylim(height - 0.5, -0.5)
         self.ax_y_spectral.tick_params(left=False, labelleft=False)
 
         self._redraw_selections()
