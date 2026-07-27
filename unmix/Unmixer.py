@@ -978,6 +978,29 @@ class UnmixerWindow(QMainWindow):
         self.ax_spectrum.grid(True, alpha=0.3)
         self.spectrum_canvas.draw_idle()
 
+    def _plot_residual(self, residual):
+        """Plot residual or standard deviation error overlay on the spectrum panel."""
+        if residual is None or len(residual) == 0:
+            return
+        if hasattr(self, 'ax_residual') and self.ax_residual is not None:
+            self.ax_residual.clear()
+            L = len(residual)
+            wavelengths = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, L + 1, dtype=float)
+            self.ax_residual.plot(wavelengths, residual, 'r-', linewidth=1, alpha=0.7)
+            self.ax_residual.set_xlabel("Spectral Band")
+            self.ax_residual.set_ylabel("Std / Residual")
+            self.ax_residual.grid(True, alpha=0.3)
+            self.spectrum_canvas.draw_idle()
+        elif residual.any() and self.current_selection and 'spectrum' in self.current_selection:
+            spectrum = self.current_selection['spectrum']
+            wavelengths = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, len(spectrum) + 1, dtype=float)
+            if len(residual) == len(spectrum):
+                self.ax_spectrum.fill_between(
+                    wavelengths, spectrum - residual, spectrum + residual,
+                    color='blue', alpha=0.2, label='±1 Std Dev')
+                self.ax_spectrum.legend(loc='best', fontsize=8)
+                self.spectrum_canvas.draw_idle()
+
     def _plot_basis_spectra(self):
         """Plot basis/endmember spectra in the spectrum panel."""
         if self.basis_spectra is None:
