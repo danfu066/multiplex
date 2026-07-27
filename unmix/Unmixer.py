@@ -328,10 +328,11 @@ class UnmixerWindow(QMainWindow):
         open_npy_action.triggered.connect(self.open_npy)
         file_menu.addAction(open_npy_action)
 
-        open_csv_action = QAction("Open CSV Spectrum", self)
-        open_csv_action.setToolTip("Load a CSV spectrum as calibration basis")
-        open_csv_action.triggered.connect(self.open_csv_basis)
-        file_menu.addAction(open_csv_action)
+        open_tiff_action = QAction("Open TIFF Stack (.tif/.tiff)", self)
+        open_tiff_action.setShortcut("Ctrl+T")
+        open_tiff_action.setToolTip("Load multipage TIFF stack hyperspectral image")
+        open_tiff_action.triggered.connect(self.open_tiff)
+        file_menu.addAction(open_tiff_action)
 
         file_menu.addSeparator()
 
@@ -595,6 +596,47 @@ class UnmixerWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "NPY Load Error",
                                  f"Failed to load .npy file:\n{e}")
+
+    def open_tiff(self):
+        """Load a multipage TIFF stack hyperspectral image."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open TIFF Stack", "", "TIFF Files (*.tif *.tiff);;All Files (*)")
+        if not file_path:
+            return
+        try:
+            self._load_tiff(file_path)
+        except Exception as e:
+            QMessageBox.critical(self, "TIFF Load Error",
+                                 f"Failed to load TIFF stack:\n{e}")
+
+    def _load_tiff(self, file_path):
+        """Read multipage TIFF stack and format as (H, W, L) hypercube."""
+        try:
+            import tifffile
+            data = tifffile.imread(file_path)
+        except ImportError:
+            try:
+                from skimage import io
+                data = io.imread(file_path)
+            except ImportError:
+                raise ImportError(
+                    "Install tifffile for TIFF support: pip install tifffile")
+
+        data = np.array(data, dtype=np.float64)
+
+        if data.ndim == 3:
+            # tifffile.imread returns (pages/bands, H, W) for multi-page TIFF stacks.
+            # Transpose to (H, W, bands) for Unmixer hypercube convention.
+            data = np.moveaxis(data, 0, -1)
+        elif data.ndim == 2:
+            data = data[:, :, np.newaxis]
+        else:
+            raise ValueError(f"Unsupported array shape in TIFF: {data.shape}")
+
+        self.hypercube = data
+        self._on_data_loaded()
+        H, W, L = self.hypercube.shape
+        self.statusBar().showMessage(f"Loaded TIFF: {H}x{W}x{L}")
 
     def open_csv_basis(self):
         """Load a CSV spectrum file as calibration basis."""

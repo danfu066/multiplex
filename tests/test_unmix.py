@@ -65,6 +65,25 @@ class TestUnmixPackage(unittest.TestCase):
         self.assertEqual(result['hypercube'].shape, (self.H, self.W, self.L))
         self.assertEqual(result['info']['wavelet'], 'db4')
 
+    def test_tiff_stack_loading(self):
+        import tifffile
+        import tempfile
+        # Create temporary multipage TIFF stack (L, H, W)
+        stack = np.moveaxis(self.cube, -1, 0).astype(np.float32)
+        with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            if hasattr(tifffile, 'imwrite'):
+                tifffile.imwrite(tmp_path, stack)
+            else:
+                tifffile.imsave(tmp_path, stack)
+            loaded = tifffile.imread(tmp_path)
+            loaded = np.moveaxis(loaded, 0, -1)
+            self.assertEqual(loaded.shape, (self.H, self.W, self.L))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
     # -----------------------------------------------------------------------
     # Blind Unmixing
     # -----------------------------------------------------------------------
