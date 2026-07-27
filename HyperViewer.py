@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QSlider, QFileDialog, QGroupBox, QCheckBox,
     QScrollArea, QButtonGroup, QMessageBox, QToolBar, QAction, QSpinBox,
-    QRadioButton, QComboBox
+    QDoubleSpinBox, QRadioButton, QComboBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap, QIcon, QPen, QBrush, QColor
@@ -135,6 +135,9 @@ class HyperViewer(QMainWindow):
         # Background subtraction
         self.background_spectrum = None
         self.background_subtracted = False
+
+        # Color limits for contrast/colorbar editing
+        self.clim = None
 
         # Cross-section position for X and Y spectral views
         self.crosshair_x = None  # X position for Y-spectral view (horizontal line)
@@ -447,6 +450,29 @@ class HyperViewer(QMainWindow):
         self.cmap_combo.currentTextChanged.connect(self.on_colormap_changed)
         tool_layout.addWidget(self.cmap_combo)
 
+        # Color Scale Limits (Vmin, Vmax, Auto)
+        tool_layout.addSpacing(15)
+        tool_layout.addWidget(QLabel("C-Min:"))
+        self.vmin_spinbox = QDoubleSpinBox()
+        self.vmin_spinbox.setRange(-1e9, 1e9)
+        self.vmin_spinbox.setDecimals(2)
+        self.vmin_spinbox.setFixedWidth(75)
+        self.vmin_spinbox.valueChanged.connect(self.on_clim_changed)
+        tool_layout.addWidget(self.vmin_spinbox)
+
+        tool_layout.addWidget(QLabel("C-Max:"))
+        self.vmax_spinbox = QDoubleSpinBox()
+        self.vmax_spinbox.setRange(-1e9, 1e9)
+        self.vmax_spinbox.setDecimals(2)
+        self.vmax_spinbox.setFixedWidth(75)
+        self.vmax_spinbox.valueChanged.connect(self.on_clim_changed)
+        tool_layout.addWidget(self.vmax_spinbox)
+
+        self.auto_clim_btn = QPushButton("Auto Scale")
+        self.auto_clim_btn.setToolTip("Reset color scale to auto min/max of current frame")
+        self.auto_clim_btn.clicked.connect(self.reset_clim_auto)
+        tool_layout.addWidget(self.auto_clim_btn)
+
         # Separator
         tool_layout.addSpacing(20)
 
@@ -699,15 +725,36 @@ class HyperViewer(QMainWindow):
         self.ax_y_spectral.set_position([pos_y.x0, pos_main.y0, pos_y.width, pos_main.height])
 
     def display_frame(self, frame_idx):
-        """Display a specific spectral frame"""
+        """Display a specific spectral frame with unified colormap and color limits across XY, XZ, YZ views."""
         if self.hypercube is None:
             return
 
         height, width, bands = self.hypercube.shape
+        frame_idx = max(0, min(frame_idx, bands - 1))
 
-        # Main spatial view
+        # Determine color limits (vmin, vmax)
+        if hasattr(self, 'clim') and self.clim is not None:
+            vmin, vmax = self.clim
+        else:
+            frame_data = self.hypercube[:, :, frame_idx]
+            vmin = float(np.nanmin(frame_data))
+            vmax = float(np.nanmax(frame_data))
+            if vmin == vmax:
+                vmax = vmin + 1.0
+
+        # Update min/max spinboxes without triggering signals
+        if hasattr(self, 'vmin_spinbox') and hasattr(self, 'vmax_spinbox'):
+            self.vmin_spinbox.blockSignals(True)
+            self.vmax_spinbox.blockSignals(True)
+            self.vmin_spinbox.setValue(vmin)
+            self.vmax_spinbox.setValue(vmax)
+            self.vmin_spinbox.blockSignals(False)
+            self.vmax_spinbox.blockSignals(False)
+
+        # 1. Main spatial view (XY)
         self.ax_main.clear()
         im = self.ax_main.imshow(self.hypercube[:, :, frame_idx], cmap=self.current_colormap,
+                                vmin=vmin, vmax=vmax,
                                 interpolation='nearest', extent=[-0.5, width - 0.5, height - 0.5, -0.5])
         self.ax_main.set_xlim(-0.5, width - 0.5)
         self.ax_main.set_ylim(height - 0.5, -0.5)
@@ -715,21 +762,23 @@ class HyperViewer(QMainWindow):
         # Update colorbar
         self._update_colorbar(im)
 
-        # X spectral view: horizontal cross-section at crosshair_y
+        # 2. X spectral view (XZ): horizontal cross-section at crosshair_y
         self.ax_x_spectral.clear()
-        cy = max(0, min(self.crosshair_y, height - 1))
+        cy = max(0, min(self.crosshair_y if self.crosshair_y is not None else height // 2, height - 1))
         x_spectral = self.hypercube[cy, :, :]
-        self.ax_x_spectral.imshow(x_spectral.T, cmap='gray', aspect='auto',
+        self.ax_x_spectral.imshow(x_spectral.T, cmap=self.current_colormap,
+                                   vmin=vmin, vmax=vmax, aspect='auto',
                                    extent=[-0.5, width - 0.5, bands - 0.5, -0.5])
         self.ax_x_spectral.set_xlim(-0.5, width - 0.5)
         self.ax_x_spectral.set_ylim(bands - 0.5, -0.5)
         plt.setp(self.ax_x_spectral.get_xticklabels(), visible=False)
 
-        # Y spectral view: vertical cross-section at crosshair_x
+        # 3. Y spectral view (YZ): vertical cross-section at crosshair_x
         self.ax_y_spectral.clear()
-        cx = max(0, min(self.crosshair_x, width - 1))
+        cx = max(0, min(self.crosshair_x if self.crosshair_x is not None else width // 2, width - 1))
         y_spectral = self.hypercube[:, cx, :]
-        self.ax_y_spectral.imshow(y_spectral, cmap='gray', aspect='auto',
+        self.ax_y_spectral.imshow(y_spectral, cmap=self.current_colormap,
+                                   vmin=vmin, vmax=vmax, aspect='auto',
                                    extent=[-0.5, bands - 0.5, height - 0.5, -0.5])
         self.ax_y_spectral.set_xlim(-0.5, bands - 0.5)
         self.ax_y_spectral.set_ylim(height - 0.5, -0.5)
@@ -742,17 +791,32 @@ class HyperViewer(QMainWindow):
         self.image_canvas.draw_idle()
 
     def _update_colorbar(self, mappable):
-        """Update the colorbar with new mappable"""
+        """Update the colorbar with new mappable and clean labels"""
         self.ax_cbar.clear()
-        self.ax_cbar.set_xticks([])
-        self.ax_cbar.set_yticks([])
-        self.image_fig.colorbar(mappable, cax=self.ax_cbar, orientation='vertical')
+        cbar = self.image_fig.colorbar(mappable, cax=self.ax_cbar, orientation='vertical')
+        cbar.ax.tick_params(labelsize=8)
 
     def on_colormap_changed(self, cmap_name):
         """Handle colormap change"""
         self.current_colormap = cmap_name
-        # Redraw current frame with new colormap
-        self.display_frame(self.current_frame)
+        if self.hypercube is not None:
+            self.display_frame(self.current_frame)
+
+    def on_clim_changed(self):
+        """Handle manual color limit (Vmin, Vmax) spinbox changes."""
+        vmin = self.vmin_spinbox.value()
+        vmax = self.vmax_spinbox.value()
+        if vmin >= vmax:
+            return
+        self.clim = (vmin, vmax)
+        if self.hypercube is not None:
+            self.display_frame(self.current_frame)
+
+    def reset_clim_auto(self):
+        """Reset color scale limits to auto frame min/max."""
+        self.clim = None
+        if self.hypercube is not None:
+            self.display_frame(self.current_frame)
 
     def toggle_lock_axes(self):
         """Toggle lock/unlock for spectrum plot axes"""

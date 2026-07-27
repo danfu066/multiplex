@@ -247,10 +247,37 @@ class UnmixerWindow(QMainWindow):
         tool_layout.addSpacing(10)
         tool_layout.addWidget(QLabel("Colormap:"))
         self.colormap_combo = QComboBox()
-        self.colormap_combo.addItems(['gray', 'viridis', 'plasma', 'inferno', 'magma', 'cividis'])
+        self.colormap_combo.addItems([
+            'gray', 'viridis', 'plasma', 'inferno', 'magma', 'cividis',
+            'jet', 'hot', 'cool', 'spring', 'summer', 'autumn', 'winter',
+            'bone', 'copper', 'red', 'green', 'blue'
+        ])
         self.colormap_combo.setCurrentText('gray')
         self.colormap_combo.currentTextChanged.connect(self._on_colormap_changed)
         tool_layout.addWidget(self.colormap_combo)
+
+        # Color Scale Limits (Vmin, Vmax, Auto)
+        tool_layout.addSpacing(15)
+        tool_layout.addWidget(QLabel("C-Min:"))
+        self.vmin_spinbox = QDoubleSpinBox()
+        self.vmin_spinbox.setRange(-1e9, 1e9)
+        self.vmin_spinbox.setDecimals(2)
+        self.vmin_spinbox.setFixedWidth(75)
+        self.vmin_spinbox.valueChanged.connect(self._on_clim_changed)
+        tool_layout.addWidget(self.vmin_spinbox)
+
+        tool_layout.addWidget(QLabel("C-Max:"))
+        self.vmax_spinbox = QDoubleSpinBox()
+        self.vmax_spinbox.setRange(-1e9, 1e9)
+        self.vmax_spinbox.setDecimals(2)
+        self.vmax_spinbox.setFixedWidth(75)
+        self.vmax_spinbox.valueChanged.connect(self._on_clim_changed)
+        tool_layout.addWidget(self.vmax_spinbox)
+
+        self.auto_clim_btn = QPushButton("Auto Scale")
+        self.auto_clim_btn.setToolTip("Reset color scale to auto min/max of current frame")
+        self.auto_clim_btn.clicked.connect(self._reset_clim_auto)
+        tool_layout.addWidget(self.auto_clim_btn)
 
         tool_layout.addStretch()
         left_layout.addWidget(tool_group)
@@ -728,16 +755,36 @@ class UnmixerWindow(QMainWindow):
             self.display_frame(value)
 
     def display_frame(self, frame_idx):
-        """Display a specific spectral frame with XZ and YZ cross-sections."""
+        """Display a specific spectral frame with XZ and YZ cross-sections sharing colormap & scale."""
         if self.hypercube is None:
             return
 
         height, width, bands = self.hypercube.shape
         frame_idx = max(0, min(frame_idx, bands - 1))
 
-        # Main Spatial View
+        # Determine color limits (vmin, vmax)
+        if hasattr(self, 'clim') and self.clim is not None:
+            vmin, vmax = self.clim
+        else:
+            frame_data = self.hypercube[:, :, frame_idx]
+            vmin = float(np.nanmin(frame_data))
+            vmax = float(np.nanmax(frame_data))
+            if vmin == vmax:
+                vmax = vmin + 1.0
+
+        # Update min/max spinboxes without triggering signals
+        if hasattr(self, 'vmin_spinbox') and hasattr(self, 'vmax_spinbox'):
+            self.vmin_spinbox.blockSignals(True)
+            self.vmax_spinbox.blockSignals(True)
+            self.vmin_spinbox.setValue(vmin)
+            self.vmax_spinbox.setValue(vmax)
+            self.vmin_spinbox.blockSignals(False)
+            self.vmax_spinbox.blockSignals(False)
+
+        # Main Spatial View (XY)
         self.ax_main.clear()
         im = self.ax_main.imshow(self.hypercube[:, :, frame_idx], cmap=self.current_colormap,
+                                vmin=vmin, vmax=vmax,
                                 interpolation='nearest', extent=[-0.5, width - 0.5, height - 0.5, -0.5])
         self.ax_main.set_xlim(-0.5, width - 0.5)
         self.ax_main.set_ylim(height - 0.5, -0.5)
@@ -751,16 +798,16 @@ class UnmixerWindow(QMainWindow):
             self.ax_main.axvline(cx, color='red', linestyle='--', linewidth=0.8, alpha=0.7)
 
         # Colorbar
-        if self.ax_cbar is not None and self.ax_cbar in self.image_fig.axes:
-            self.image_fig.delaxes(self.ax_cbar)
-        self.ax_cbar = self.image_fig.add_subplot(self.image_fig.axes[0].get_subplotspec()) if False else self.image_fig.add_subplot(self.image_fig.axes[0])
-        # Re-add colorbar cleanly
-        self.ax_cbar = self.image_fig.add_subplot(self.image_fig.axes[0]) if False else None
+        self.ax_cbar.clear()
+        cbar = self.image_fig.colorbar(im, cax=self.ax_cbar, orientation='vertical')
+        cbar.ax.tick_params(labelsize=8)
 
         # Update XZ Spectral View (Top): row at cy -> shape (width, bands)
         self.ax_x_spectral.clear()
         x_spectral = self.hypercube[cy, :, :]
-        self.ax_x_spectral.imshow(x_spectral.T, cmap='gray', aspect='auto', extent=[-0.5, width - 0.5, bands - 0.5, -0.5])
+        self.ax_x_spectral.imshow(x_spectral.T, cmap=self.current_colormap,
+                                   vmin=vmin, vmax=vmax, aspect='auto',
+                                   extent=[-0.5, width - 0.5, bands - 0.5, -0.5])
         self.ax_x_spectral.set_xlim(-0.5, width - 0.5)
         self.ax_x_spectral.set_ylim(bands - 0.5, -0.5)
         self.ax_x_spectral.tick_params(bottom=False, labelbottom=False)
@@ -768,7 +815,9 @@ class UnmixerWindow(QMainWindow):
         # Update YZ Spectral View (Left): col at cx -> shape (height, bands)
         self.ax_y_spectral.clear()
         y_spectral = self.hypercube[:, cx, :]
-        self.ax_y_spectral.imshow(y_spectral, cmap='gray', aspect='auto', extent=[-0.5, bands - 0.5, height - 0.5, -0.5])
+        self.ax_y_spectral.imshow(y_spectral, cmap=self.current_colormap,
+                                   vmin=vmin, vmax=vmax, aspect='auto',
+                                   extent=[-0.5, bands - 0.5, height - 0.5, -0.5])
         self.ax_y_spectral.set_xlim(-0.5, bands - 0.5)
         self.ax_y_spectral.set_ylim(height - 0.5, -0.5)
         self.ax_y_spectral.tick_params(left=False, labelleft=False)
@@ -802,6 +851,22 @@ class UnmixerWindow(QMainWindow):
 
     def _on_colormap_changed(self, cmap_name):
         self.current_colormap = cmap_name
+        if self.hypercube is not None:
+            self.display_frame(self.current_frame)
+
+    def _on_clim_changed(self):
+        """Handle manual color limit (Vmin, Vmax) spinbox changes."""
+        vmin = self.vmin_spinbox.value()
+        vmax = self.vmax_spinbox.value()
+        if vmin >= vmax:
+            return
+        self.clim = (vmin, vmax)
+        if self.hypercube is not None:
+            self.display_frame(self.current_frame)
+
+    def _reset_clim_auto(self):
+        """Reset color scale limits to auto frame min/max."""
+        self.clim = None
         if self.hypercube is not None:
             self.display_frame(self.current_frame)
 
