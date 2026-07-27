@@ -37,7 +37,6 @@ wheels/
 *.docx
 2p-xsections/
 OPD analysis/
-OPDviewer/
 
 # Temporary refactoring scripts
 _refactor_unmixer.py
