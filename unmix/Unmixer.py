@@ -284,11 +284,7 @@ class UnmixerWindow(QMainWindow):
         self.ax_cbar.set_xticks([])
         self.ax_cbar.set_yticks([])
 
-        self.ax_x_spectral.set_title("X Spectral")
-        self.ax_y_spectral.set_title("Y Spectral", rotation=90)
         self.ax_main.set_title("Spatial View")
-        self.ax_main.set_xlabel("X (pixels)")
-        self.ax_main.set_ylabel("Y (pixels)")
 
         image_layout.addWidget(self.image_canvas)
         left_layout.addWidget(image_group)
@@ -745,8 +741,6 @@ class UnmixerWindow(QMainWindow):
         self.ax_main.clear()
         im = self.ax_main.imshow(self.hypercube[:, :, frame_idx], cmap=self.current_colormap, interpolation='nearest')
         self.ax_main.set_title(f"Spatial View - Band {frame_idx}")
-        self.ax_main.set_xlabel("X (pixels)")
-        self.ax_main.set_ylabel("Y (pixels)")
         self.ax_main.set_xlim(0, width - 1)
         self.ax_main.set_ylim(height - 1, 0)
         self.im_handle = im
@@ -768,8 +762,6 @@ class UnmixerWindow(QMainWindow):
         self.ax_x_spectral.clear()
         x_spectral = self.hypercube[cy, :, :]
         self.ax_x_spectral.imshow(x_spectral.T, cmap='gray', aspect='auto', extent=[0, width - 1, bands - 1, 0])
-        self.ax_x_spectral.set_title(f"X Spectral (Y={cy})")
-        self.ax_x_spectral.set_ylabel("Band")
         self.ax_x_spectral.set_xlim(0, width - 1)
         self.ax_x_spectral.set_ylim(bands - 1, 0)
         self.ax_x_spectral.tick_params(bottom=False, labelbottom=False)
@@ -778,8 +770,6 @@ class UnmixerWindow(QMainWindow):
         self.ax_y_spectral.clear()
         y_spectral = self.hypercube[:, cx, :]
         self.ax_y_spectral.imshow(y_spectral, cmap='gray', aspect='auto', extent=[0, bands - 1, height - 1, 0])
-        self.ax_y_spectral.set_title(f"Y Spectral (X={cx})", rotation=90)
-        self.ax_y_spectral.set_xlabel("Band")
         self.ax_y_spectral.set_xlim(0, bands - 1)
         self.ax_y_spectral.set_ylim(height - 1, 0)
         self.ax_y_spectral.tick_params(left=False, labelleft=False)
