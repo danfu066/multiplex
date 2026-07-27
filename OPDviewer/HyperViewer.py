@@ -447,6 +447,29 @@ class HyperViewer(QMainWindow):
         self.cmap_combo.currentTextChanged.connect(self.on_colormap_changed)
         tool_layout.addWidget(self.cmap_combo)
 
+        # Separator
+        tool_layout.addSpacing(20)
+
+        # Spatial Resample controls (Downscale / Upscale)
+        resample_label = QLabel("Resample:")
+        tool_layout.addWidget(resample_label)
+
+        self.resample_combo = QComboBox()
+        self.resample_combo.addItems([
+            "1/2 (50% Downscale)",
+            "1/3 (33% Downscale)",
+            "1/4 (25% Downscale)",
+            "2x (200% Upscale)",
+            "3x (300% Upscale)",
+            "4x (400% Upscale)"
+        ])
+        tool_layout.addWidget(self.resample_combo)
+
+        self.resample_btn = QPushButton("Apply Resample")
+        self.resample_btn.setToolTip("Downscale (block average) or Upscale (interpolate) spatial dimensions")
+        self.resample_btn.clicked.connect(self.apply_spatial_resample)
+        tool_layout.addWidget(self.resample_btn)
+
         layout.addWidget(tool_group)
         
     def create_menu_bar(self):
@@ -495,6 +518,69 @@ class HyperViewer(QMainWindow):
             self.ax_main.figure.canvas.mpl_connect('button_release_event', self.on_canvas_release)
             self.ax_main.figure.canvas.mpl_connect('motion_notify_event', self.on_canvas_motion)
         
+    def apply_spatial_resample(self):
+        """Downscale (1/2, 1/3, 1/4 via block averaging) or Upscale (2x, 3x, 4x via bilinear interpolation)."""
+        if self.hypercube is None:
+            QMessageBox.warning(self, "Warning", "Please load a dataset first.")
+            return
+
+        factor_str = self.resample_combo.currentText()
+        H, W, B = self.hypercube.shape
+
+        if "1/2" in factor_str:
+            k = 2
+            mode = "downscale"
+        elif "1/3" in factor_str:
+            k = 3
+            mode = "downscale"
+        elif "1/4" in factor_str:
+            k = 4
+            mode = "downscale"
+        elif "2x" in factor_str:
+            k = 2
+            mode = "upscale"
+        elif "3x" in factor_str:
+            k = 3
+            mode = "upscale"
+        elif "4x" in factor_str:
+            k = 4
+            mode = "upscale"
+        else:
+            return
+
+        try:
+            if mode == "downscale":
+                H_new = H // k
+                W_new = W // k
+                if H_new < 2 or W_new < 2:
+                    QMessageBox.warning(self, "Warning", f"Image dimensions ({H}x{W}) are too small to downscale by 1/{k}.")
+                    return
+                cube_cropped = self.hypercube[:H_new * k, :W_new * k, :]
+                new_cube = cube_cropped.reshape(H_new, k, W_new, k, B).mean(axis=(1, 3))
+                msg = f"Downscaled image by 1/{k} ({H}x{W} -> {H_new}x{W_new})"
+
+            else:  # upscale
+                try:
+                    from scipy.ndimage import zoom
+                    new_cube = zoom(self.hypercube, (k, k, 1), order=1)
+                except ImportError:
+                    new_cube = np.repeat(np.repeat(self.hypercube, k, axis=0), k, axis=1)
+                H_new, W_new = new_cube.shape[:2]
+                msg = f"Upscaled image by {k}x ({H}x{W} -> {H_new}x{W_new})"
+
+            self.hypercube = new_cube.astype(np.float32)
+            if hasattr(self, 'hypercube_original') and self.hypercube_original is not None:
+                self.hypercube_original = self.hypercube.copy()
+            self.clear_selection()
+            self.spectra_list = []
+            self.update_checkbox_list()
+            self.setup_display()
+            self.statusBar().showMessage(msg)
+            QMessageBox.information(self, "Spatial Resample", msg)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to resample image:\n{e}")
+
     def load_image(self):
         """Open file dialog and load hyperspectral image"""
         file_types = "All Supported (*.tif *.tiff *.npy *.mat);;TIFF Files (*.tif *.tiff);;NumPy Files (*.npy);;MAT Files (*.mat);;All Files (*.*)"

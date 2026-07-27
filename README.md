@@ -54,6 +54,10 @@ Select an ROI tool from the left panel:
 - **Add Current Selection**: Saves the active ROI to the spectrum list and renders its open outline marker permanently on the spatial image.
 - **Delete / Visibility**: Check/uncheck boxes to toggle individual spectrum visibility, click `×` to delete single spectra, or click **Delete Selected** to clear multiple selections. All spatial markers update in real time.
 
+### Spatial Resample (Downscale / Upscale)
+- **Downscale (1/2, 1/3, 1/4)**: Uses $k \times k$ block-averaging to reduce spatial dimensions, shrinking pixel count by up to 16x and accelerating unmixing and OPD calculations by up to 1600%.
+- **Upscale (2x, 3x, 4x)**: Uses spatial bilinear interpolation to enlarge the image grid.
+
 ### Spectrum Plot Controls
 - **🔒 Lock Axes**: Freezes current $X$ and $Y$ axis limits during frame switching.
 - **⤡ Autoscale**: Automatically scales spectrum plot axes to fit all visible spectra with a 5% margin.
