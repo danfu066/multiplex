@@ -456,56 +456,31 @@ class OPDViewer(HyperViewer):
     # ---------------- UI ----------------
 
     def _build_opd_ui(self):
-        bar = QToolBar("OPD")
-        self.addToolBar(Qt.TopToolBarArea, bar)
-
-        act_load = QAction("Load Voltage Stack…", self)
-        act_load.setToolTip("Multi-page TIFF; voltages read from ImageJ labels")
-        act_load.triggered.connect(self.load_voltage_stack)
-        bar.addAction(act_load)
-
-        act_volt = QAction("Load Voltages…", self)
-        act_volt.setToolTip("Supply voltages from .csv/.txt/.npy if the TIFF "
-                            "has no metadata")
-        act_volt.triggered.connect(self.load_voltages)
-        bar.addAction(act_volt)
-
-        bar.addSeparator()
-
         self.act_convert = QAction("Convert to OPD", self)
         self.act_convert.setToolTip("Convert the intensity stack to OPD (nm)")
         self.act_convert.triggered.connect(self.convert_stack_to_opd)
-        bar.addAction(self.act_convert)
 
         self.act_revert = QAction("Revert to Intensity", self)
         self.act_revert.triggered.connect(self.revert_to_intensity)
         self.act_revert.setEnabled(False)
-        bar.addAction(self.act_revert)
 
         self.act_save = QAction("Save OPD…", self)
         self.act_save.triggered.connect(self.save_opd)
         self.act_save.setEnabled(False)
-        bar.addAction(self.act_save)
-
-        bar.addSeparator()
-        self.opd_status = QLabel("  Mode: intensity   ")
-        self.opd_status.setStyleSheet("color: #444; font-style: italic;")
-        bar.addWidget(self.opd_status)
 
         menu = self.menuBar().addMenu("OPD")
-        for a in (act_load, act_volt, self.act_convert,
-                  self.act_revert, self.act_save):
-            menu.addAction(a)
+        menu.addAction(self.act_convert)
+        menu.addAction(self.act_revert)
+        menu.addAction(self.act_save)
 
     def _set_status(self):
         if self.is_opd:
-            self.opd_status.setText("  Mode: OPD (nm)   ")
-            self.opd_status.setStyleSheet("color: green; font-weight: bold;")
+            msg = "Mode: OPD (nm)"
         else:
             n = 0 if self.voltages is None else len(self.voltages)
-            extra = f", {n} voltages" if n else ", no voltages"
-            self.opd_status.setText(f"  Mode: intensity{extra}   ")
-            self.opd_status.setStyleSheet("color: #444; font-style: italic;")
+            extra = f", {n} voltages" if n else ""
+            msg = f"Mode: Intensity{extra}"
+        self.statusBar().showMessage(msg)
 
     # ---------------- loading ----------------
 
@@ -514,88 +489,64 @@ class OPDViewer(HyperViewer):
         m = re.search(r"([0-9]*\.?[0-9]+)\s*V", str(label))
         return float(m.group(1)) if m else None
 
-    def load_voltage_stack(self):
-        """Load a multi-page TIFF and read per-frame voltages if present."""
-        if not HAS_TIFFFILE:
-            QMessageBox.critical(self, "Error",
-                                 "tifffile is required:\npip install tifffile")
-            return
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Load Voltage Stack", "", "TIFF Files (*.tif *.tiff)")
-        if not path:
-            return
-        try:
-            with tifffile.TiffFile(path) as tf:
-                meta = tf.imagej_metadata or {}
-                labels = meta.get("Labels")
-                data = tf.asarray()
+    def load_dataset(self, file_path):
+        """Load dataset and automatically extract per-frame voltage metadata if present."""
+        ext = os.path.splitext(file_path)[1].lower()
+        volts = None
+        cube = None
 
-            data = np.asarray(data)
-            if data.ndim != 3:
-                raise ValueError(f"Expected a 3D stack, got shape {data.shape}")
+        if ext in ['.tif', '.tiff'] and HAS_TIFFFILE:
+            try:
+                with tifffile.TiffFile(file_path) as tf:
+                    meta = tf.imagej_metadata or {}
+                    labels = meta.get("Labels")
+                    data = tf.asarray()
 
-            volts = None
-            if labels:
-                parsed = [self._voltage_from_label(l) for l in labels]
-                if all(v is not None for v in parsed) and len(parsed) == data.shape[0]:
-                    volts = np.array(parsed, dtype=float)
+                data = np.asarray(data)
+                if data.ndim == 3:
+                    if labels:
+                        parsed = [self._voltage_from_label(l) for l in labels]
+                        if all(v is not None for v in parsed) and len(parsed) == data.shape[0]:
+                            volts = np.array(parsed, dtype=float)
 
-            if volts is not None:                     # sort ascending
-                order = np.argsort(volts)
-                volts = volts[order]
-                data = data[order]
+                    if volts is not None:
+                        order = np.argsort(volts)
+                        volts = volts[order]
+                        data = data[order]
 
-            # tifffile gives (N, H, W); HyperViewer wants (H, W, N)
-            cube = np.transpose(data, (1, 2, 0)).astype(np.float32)
+                    cube = np.transpose(data, (1, 2, 0)).astype(np.float32)
+            except Exception:
+                pass
 
-            self.voltages = volts
-            self.is_opd = False
-            self.intensity_cube = None
+        if cube is None:
+            super().load_dataset(file_path)
+            if self.hypercube is not None:
+                N = self.hypercube.shape[2]
+                base_no_ext = os.path.splitext(file_path)[0]
+                for v_ext in ['.npy', '.csv', '.txt']:
+                    v_path = base_no_ext + '_voltages' + v_ext
+                    if os.path.exists(v_path):
+                        try:
+                            if v_ext == '.npy':
+                                v = np.load(v_path).astype(float).ravel()
+                            else:
+                                v = np.loadtxt(v_path, delimiter=',' if v_ext == '.csv' else None).astype(float).ravel()
+                            if len(v) == N:
+                                volts = np.sort(v)
+                                break
+                        except Exception:
+                            pass
+        else:
             self.hypercube = cube
-            self.setup_display()
-            self.act_revert.setEnabled(False)
-            self.act_save.setEnabled(False)
-            self._set_status()
-            self.setWindowTitle(f"OPDViewer - {os.path.basename(path)}")
 
-            if volts is None:
-                QMessageBox.information(
-                    self, "Loaded",
-                    f"Loaded {data.shape[0]} frames, but no voltages were found "
-                    "in the ImageJ labels.\n\nUse 'Load Voltages…' before "
-                    "converting, or the frame index will be used instead.")
-        except Exception as exc:
-            import traceback
-            QMessageBox.critical(self, "Error",
-                                 f"Failed to load stack:\n{exc}\n\n"
-                                 f"{traceback.format_exc()}")
-
-    def load_voltages(self):
-        """Load a 1D voltage array from .npy/.csv/.txt."""
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Load Voltages", "",
-            "All Supported (*.npy *.csv *.txt);;All Files (*.*)")
-        if not path:
-            return
-        try:
-            if path.lower().endswith(".npy"):
-                v = np.load(path).astype(float).ravel()
-            else:
-                v = np.loadtxt(path, delimiter="," if path.lower().endswith(".csv")
-                               else None).astype(float).ravel()
-            if self.hypercube is not None and len(v) != self.hypercube.shape[2]:
-                QMessageBox.warning(
-                    self, "Mismatch",
-                    f"{len(v)} voltages but the stack has "
-                    f"{self.hypercube.shape[2]} frames.")
-                return
-            self.voltages = np.sort(v)
-            self._set_status()
-            QMessageBox.information(self, "Loaded",
-                                    f"Loaded {len(v)} voltages "
-                                    f"({v.min():.3f} - {v.max():.3f} V).")
-        except Exception as exc:
-            QMessageBox.critical(self, "Error", f"Failed to load voltages:\n{exc}")
+        self.voltages = volts
+        self.is_opd = False
+        self.intensity_cube = None
+        self.setup_display()
+        self.act_revert.setEnabled(False)
+        self.act_save.setEnabled(False)
+        self._set_status()
+        self.setWindowTitle(f"OPDViewer - {os.path.basename(file_path)}")
 
     # ---------------- conversion ----------------
 
