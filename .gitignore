@@ -29,6 +29,8 @@ wheels/
 *.mat
 *.csv
 *.xlsx
+*.tif
+*.tiff
 
 # Large binary datasets & research documents
 *.pdf

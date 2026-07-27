@@ -753,7 +753,8 @@ class UnmixerWindow(QMainWindow):
         self.ax_y_avg.set_xticks([])
 
         # Colorbar
-        self.fig_main.del_axes(self.ax_cbar)
+        if self.ax_cbar is not None and self.ax_cbar in self.fig_main.axes:
+            self.fig_main.delaxes(self.ax_cbar)
         self.ax_cbar = self.fig_main.add_subplot(self.gs_main[1, 2])
         self.fig_main.colorbar(self.im_handle, cax=self.ax_cbar)
 
@@ -958,7 +959,8 @@ class UnmixerWindow(QMainWindow):
         self.ax_main.set_ylim(H - 0.5, -0.5)
         self.ax_main.set_aspect("equal")
 
-        self.fig_main.del_axes(self.ax_cbar)
+        if self.ax_cbar is not None and self.ax_cbar in self.fig_main.axes:
+            self.fig_main.delaxes(self.ax_cbar)
         self.ax_cbar = self.fig_main.add_subplot(self.gs_main[1, 2])
         self.fig_main.colorbar(self.im_handle, cax=self.ax_cbar)
 
@@ -968,7 +970,7 @@ class UnmixerWindow(QMainWindow):
     def _plot_spectrum(self, spectrum):
         """Plot a spectrum in the spectrum panel."""
         self.ax_spectrum.clear()
-        wavelengths = self.basis_wavelengths or np.arange(1, len(spectrum) + 1, dtype=float)
+        wavelengths = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, len(spectrum) + 1, dtype=float)
         self.ax_spectrum.plot(wavelengths, spectrum, 'b-', linewidth=1)
         self.ax_spectrum.set_xlabel("Spectral Band")
         self.ax_spectrum.set_ylabel("Intensity")
@@ -981,7 +983,7 @@ class UnmixerWindow(QMainWindow):
         if self.basis_spectra is None:
             return
         self.ax_spectrum.clear()
-        wavelengths = self.basis_wavelengths or np.arange(1, self.basis_spectra.shape[1] + 1, dtype=float)
+        wavelengths = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, self.basis_spectra.shape[1] + 1, dtype=float)
         colors = plt.cm.tab10(np.linspace(0, 1, self.basis_spectra.shape[0]))
         for i, (spec, label) in enumerate(zip(self.basis_spectra, self.basis_labels or [])):
             self.ax_spectrum.plot(wavelengths, spec, color=colors[i],
@@ -1054,7 +1056,7 @@ class UnmixerWindow(QMainWindow):
     def _plot_extracted_spectra(self):
         """Plot all extracted spectra."""
         self.ax_spectrum.clear()
-        wavelengths = self.basis_wavelengths or np.arange(1, 100, dtype=float)
+        wavelengths = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, 100, dtype=float)
         colors = plt.cm.tab10(np.linspace(0, 1, max(len(self.extracted_spectra), 1)))
         for i, (spec, label) in enumerate(self.extracted_spectra):
             wl = wavelengths[:len(spec)] if len(wavelengths) >= len(spec) else np.arange(1, len(spec) + 1, dtype=float)
@@ -1082,7 +1084,7 @@ class UnmixerWindow(QMainWindow):
         if not file_path:
             return
         try:
-            wavelengths = self.basis_wavelengths or np.arange(1, self.extracted_spectra[0][0].shape[0] + 1, dtype=float)
+            wavelengths = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, self.extracted_spectra[0][0].shape[0] + 1, dtype=float)
             with open(file_path, 'w') as f:
                 f.write("Wavelength," + ",".join(label for _, label in self.extracted_spectra) + "\n")
                 for i, wl in enumerate(wavelengths):
@@ -2034,7 +2036,7 @@ class UnmixerWindow(QMainWindow):
         """Show original vs processed spectrum for a single pixel."""
         fig, ax = plt.subplots(figsize=(8, 4))
         L = hypercube_orig.shape[2]
-        wavelengths = self.basis_wavelengths or np.arange(1, L + 1, dtype=float)
+        wavelengths = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, L + 1, dtype=float)
         ax.plot(wavelengths, hypercube_orig[y, x, :], 'b-',
                 linewidth=1, label='Original', alpha=0.7)
         ax.plot(wavelengths, hypercube_proc[y, x, :], 'r-',
