@@ -1,0 +1,14 @@
+# Hyperspectral Unmixer — dependencies
+# Install: pip install -r requirements.txt
+
+# Core
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+
+# GUI
+PyQt5>=5.15
+
+# ML / signal processing
+scikit-learn>=1.3
+PyWavelets>=1.4
