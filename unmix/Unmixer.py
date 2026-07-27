@@ -165,6 +165,9 @@ class UnmixerWindow(QMainWindow):
         self.spectra_list = []         # list of SpectrumData objects
         self.background_spectrum = None
         self.bg_radio_group = QButtonGroup(self)
+        self._temp_rect = None
+        self._temp_circle = None
+        self.current_patch = None
 
         # ---- Endmember picker state ----
         self.endmember_mode = False
@@ -847,19 +850,24 @@ class UnmixerWindow(QMainWindow):
         x0, y0 = self.selection_start
         x1, y1 = event.xdata, event.ydata
 
+        # Clear previous temporary patch
+        if hasattr(self, 'current_patch') and self.current_patch:
+            try:
+                self.current_patch.remove()
+            except Exception:
+                pass
+            self.current_patch = None
+
         if self.selection_tool == 'square':
-            if self._temp_rect is None:
-                self._temp_rect = Rectangle((x0, y0), 0, 0, fill=False, edgecolor='red', linestyle='--')
-                self.ax_main.add_patch(self._temp_rect)
-            w, h = x1 - x0, y1 - y0
-            self._temp_rect.set_bounds(min(x0, x1), min(y0, y1), abs(w), abs(h))
+            size = max(abs(x1 - x0), abs(y1 - y0))
+            half_size = size / 2.0
+            self.current_patch = Rectangle((x0 - half_size, y0 - half_size), size, size,
+                                          fill=False, color='blue', linewidth=2, linestyle='--')
+            self.ax_main.add_patch(self.current_patch)
         elif self.selection_tool == 'circle':
             r = np.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
-            if self._temp_circle is None:
-                self._temp_circle = Circle((x0, y0), r, fill=False, edgecolor='red', linestyle='--')
-                self.ax_main.add_patch(self._temp_circle)
-            else:
-                self._temp_circle.set_radius(r)
+            self.current_patch = Circle((x0, y0), r, fill=False, color='green', linewidth=2, linestyle='--')
+            self.ax_main.add_patch(self.current_patch)
         self.image_canvas.draw_idle()
 
     def _on_canvas_release(self, event):
@@ -875,10 +883,10 @@ class UnmixerWindow(QMainWindow):
         mask = np.zeros((H, W), dtype=bool)
 
         if self.selection_tool == 'square':
-            x_min, x_max = sorted([int(round(x0)), int(round(x1))])
-            y_min, y_max = sorted([int(round(y0)), int(round(y1))])
-            x_min, x_max = max(0, x_min), min(W - 1, x_max)
-            y_min, y_max = max(0, y_min), min(H - 1, y_max)
+            size = max(abs(x1 - x0), abs(y1 - y0))
+            half_size = size / 2.0
+            x_min, x_max = max(0, int(round(x0 - half_size))), min(W - 1, int(round(x0 + half_size)))
+            y_min, y_max = max(0, int(round(y0 - half_size))), min(H - 1, int(round(y0 + half_size)))
             mask[y_min:y_max+1, x_min:x_max+1] = True
         elif self.selection_tool == 'circle':
             r = np.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
@@ -896,16 +904,15 @@ class UnmixerWindow(QMainWindow):
                 'mask': mask,
                 'n_pixels': int(mask.sum()),
             }
-            self._plot_spectrum(mean_spectrum)
-            self._plot_residual(std)
+            self.update_spectrum_plot()
             self.add_btn.setEnabled(True)
 
-        if self._temp_rect:
-            self._temp_rect.remove()
-            self._temp_rect = None
-        if self._temp_circle:
-            self._temp_circle.remove()
-            self._temp_circle = None
+        if hasattr(self, 'current_patch') and self.current_patch:
+            try:
+                self.current_patch.remove()
+            except Exception:
+                pass
+            self.current_patch = None
         self.display_frame(self.current_frame)
 
     def _redraw_selections(self):
@@ -938,10 +945,30 @@ class UnmixerWindow(QMainWindow):
             self.saved_ylim = self.ax_spectrum.get_ylim()
 
     def autoscale_axes(self):
-        self.ax_spectrum.relim()
-        self.ax_spectrum.autoscale_view()
-        self.saved_xlim = self.ax_spectrum.get_xlim()
-        self.saved_ylim = self.ax_spectrum.get_ylim()
+        """Autoscale spectrum plot axes to fit all visible data (matching HyperViewer)."""
+        all_xmin, all_xmax = [], []
+        all_ymin, all_ymax = [], []
+        for line in self.ax_spectrum.get_lines():
+            xdata = line.get_xdata()
+            ydata = line.get_ydata()
+            if len(xdata) > 0:
+                all_xmin.append(np.min(xdata))
+                all_xmax.append(np.max(xdata))
+            if len(ydata) > 0:
+                all_ymin.append(np.min(ydata))
+                all_ymax.append(np.max(ydata))
+
+        if all_xmin and all_ymax:
+            x_min_val, x_max_val = min(all_xmin), max(all_xmax)
+            y_min_val, y_max_val = min(all_ymin), max(all_ymax)
+            x_margin = (x_max_val - x_min_val) * 0.05 if x_max_val != x_min_val else 1.0
+            y_margin = (y_max_val - y_min_val) * 0.05 if y_max_val != y_min_val else 0.1
+            self.ax_spectrum.set_xlim(x_min_val - x_margin, x_max_val + x_margin)
+            self.ax_spectrum.set_ylim(y_min_val - y_margin, y_max_val + y_margin)
+
+        if self.axes_locked:
+            self.saved_xlim = self.ax_spectrum.get_xlim()
+            self.saved_ylim = self.ax_spectrum.get_ylim()
         self.spectrum_canvas.draw_idle()
 
     def toggle_zoom_mode(self):
@@ -1014,9 +1041,13 @@ class UnmixerWindow(QMainWindow):
 
         self.ax_spectrum.grid(True, alpha=0.3)
 
-        if self.axes_locked and self.saved_xlim is not None and self.saved_ylim is not None:
-            self.ax_spectrum.set_xlim(self.saved_xlim)
-            self.ax_spectrum.set_ylim(self.saved_ylim)
+        if self.axes_locked:
+            if self.saved_xlim is None or self.saved_ylim is None:
+                self.saved_xlim = self.ax_spectrum.get_xlim()
+                self.saved_ylim = self.ax_spectrum.get_ylim()
+            else:
+                self.ax_spectrum.set_xlim(self.saved_xlim)
+                self.ax_spectrum.set_ylim(self.saved_ylim)
 
         self.spectrum_canvas.draw_idle()
 
@@ -1031,7 +1062,7 @@ class UnmixerWindow(QMainWindow):
             return
         spec = self.current_selection['spectrum']
         std = self.current_selection.get('std', None)
-        lbl = f"Spectrum {len(self.spectra_list) + 1}"
+        lbl = f"Spectrum {len(self.spectra_list) + 1} ({self.current_selection.get('type', 'point')})"
         colors = ['blue', 'green', 'red', 'cyan', 'magenta', 'yellow', 'orange', 'purple']
         color = colors[len(self.spectra_list) % len(colors)]
 
@@ -1039,7 +1070,8 @@ class UnmixerWindow(QMainWindow):
                              selection_type=self.current_selection.get('type', 'point'))
         self.spectra_list.append(sdata)
         self.update_checkbox_list()
-        self._plot_all_spectra()
+        self.update_spectrum_plot()
+        self.autoscale_axes()
 
     def update_checkbox_list(self):
         # Clear existing list
