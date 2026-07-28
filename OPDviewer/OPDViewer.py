@@ -75,9 +75,9 @@ import sys
 import numpy as np
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QApplication, QAction, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QApplication, QAction, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QMessageBox,
-    QProgressDialog, QPushButton, QSpinBox, QToolBar, QVBoxLayout, QWidget,
+    QProgressDialog, QPushButton, QRadioButton, QSpinBox, QToolBar, QVBoxLayout, QWidget,
 )
 
 try:
@@ -449,6 +449,115 @@ class OPDParamsDialog(QDialog):
         )
 
 
+def opd_to_intensity(opd_nm, wavelengths_nm, weights=None, convention="dark_at_zero"):
+    """
+    Convert an OPD map stack (H, W, V) in nanometers back to an intensity stack (H, W, V)
+    for a monochromatic wavelength or a polychromatic spectrum.
+
+    Crossed PBS (dark_at_zero): I = S * sin^2(pi * OPD / lambda)
+    Parallel PBS (bright_at_zero): I = S * cos^2(pi * OPD / lambda)
+    """
+    opd_nm = np.asarray(opd_nm, dtype=np.float32)
+    wavelengths_nm = np.atleast_1d(np.asarray(wavelengths_nm, dtype=np.float32))
+
+    if weights is None:
+        w_arr = np.ones_like(wavelengths_nm, dtype=np.float32)
+    else:
+        w_arr = np.asarray(weights, dtype=np.float32)
+
+    if w_arr.sum() > 0:
+        w_arr = w_arr / w_arr.sum()
+
+    H, W, V = opd_nm.shape
+    I_total = np.zeros((H, W, V), dtype=np.float32)
+
+    for wl, w in zip(wavelengths_nm, w_arr):
+        if wl <= 0:
+            continue
+        phase = (np.pi * opd_nm) / wl
+        if convention == "dark_at_zero":
+            I_wl = w * (np.sin(phase) ** 2)
+        else:
+            I_wl = w * (np.cos(phase) ** 2)
+        I_total += I_wl
+
+    return I_total
+
+
+class OPDForwardSimDialog(QDialog):
+    """Dialog for simulating intensity map stack from OPD map and spectrum/wavelength, or reverting to raw stack."""
+
+    def __init__(self, parent=None, has_raw_intensity=False, spectra_list=None, default_wl=550.0):
+        super().__init__(parent)
+        self.setWindowTitle("Revert / Simulate Intensity Map from OPD")
+        self.setMinimumWidth(480)
+        self.has_raw_intensity = has_raw_intensity
+        self.spectra_list = spectra_list or []
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        if self.has_raw_intensity:
+            self.mode_group = QButtonGroup(self)
+            self.radio_revert_raw = QRadioButton("Revert to original raw intensity stack")
+            self.radio_simulate = QRadioButton("Simulate intensity map stack from OPD & spectrum")
+            self.radio_simulate.setChecked(True)
+            self.mode_group.addButton(self.radio_revert_raw)
+            self.mode_group.addButton(self.radio_simulate)
+
+            mode_box = QVBoxLayout()
+            mode_box.addWidget(self.radio_revert_raw)
+            mode_box.addWidget(self.radio_simulate)
+            form.addRow("Action:", mode_box)
+
+        self.sim_mode_combo = QComboBox()
+        self.sim_mode_combo.addItems(["Monochromatic (Single Wavelength)", "Polychromatic Spectrum (Integrated)"])
+        self.sim_mode_combo.currentIndexChanged.connect(self._on_sim_mode_changed)
+        form.addRow("Simulation Mode:", self.sim_mode_combo)
+
+        self.wl_spin = QDoubleSpinBox()
+        self.wl_spin.setRange(200.0, 3000.0)
+        self.wl_spin.setValue(float(default_wl))
+        self.wl_spin.setDecimals(1)
+        self.wl_spin.setSuffix(" nm")
+        form.addRow("Wavelength:", self.wl_spin)
+
+        self.spectrum_combo = QComboBox()
+        self.spectrum_combo.addItem("Flat Spectrum (400 - 700 nm, 31 bands)")
+        for s in self.spectra_list:
+            lbl = getattr(s, 'label', 'Spectrum')
+            self.spectrum_combo.addItem(f"Loaded ROI: {lbl}")
+        self.spectrum_combo.setEnabled(False)
+        form.addRow("Illumination Spectrum:", self.spectrum_combo)
+
+        self.conv_combo = QComboBox()
+        self.conv_combo.addItems(["dark_at_zero (Crossed PBS)", "bright_at_zero (Parallel PBS)"])
+        form.addRow("Analyser Configuration:", self.conv_combo)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_sim_mode_changed(self, idx):
+        is_poly = (idx == 1)
+        self.wl_spin.setEnabled(not is_poly)
+        self.spectrum_combo.setEnabled(is_poly)
+
+    def is_revert_raw(self):
+        return self.has_raw_intensity and self.radio_revert_raw.isChecked()
+
+    def values(self):
+        return {
+            'is_poly': (self.sim_mode_combo.currentIndex() == 1),
+            'wavelength_nm': self.wl_spin.value(),
+            'spectrum_index': self.spectrum_combo.currentIndex(),
+            'convention': "dark_at_zero" if self.conv_combo.currentIndex() == 0 else "bright_at_zero"
+        }
+
+
 # ============================================================================
 # Viewer
 # ============================================================================
@@ -467,11 +576,16 @@ class OPDViewer(HyperViewer):
     # ---------------- UI ----------------
 
     def _build_opd_ui(self):
+        self.act_load_opd = QAction("Load OPD…", self)
+        self.act_load_opd.setToolTip("Load a previously saved OPD map stack (.npy, .tif, .mat)")
+        self.act_load_opd.triggered.connect(self.load_opd)
+
         self.act_convert = QAction("Convert to OPD", self)
         self.act_convert.setToolTip("Convert the intensity stack to OPD (nm)")
         self.act_convert.triggered.connect(self.convert_stack_to_opd)
 
-        self.act_revert = QAction("Revert to Intensity", self)
+        self.act_revert = QAction("Revert / Simulate Intensity…", self)
+        self.act_revert.setToolTip("Convert OPD map back to intensity map stack via monochromatic wavelength or spectrum simulation")
         self.act_revert.triggered.connect(self.revert_to_intensity)
         self.act_revert.setEnabled(False)
 
@@ -480,6 +594,7 @@ class OPDViewer(HyperViewer):
         self.act_save.setEnabled(False)
 
         menu = self.menuBar().addMenu("OPD")
+        menu.addAction(self.act_load_opd)
         menu.addAction(self.act_convert)
         menu.addAction(self.act_revert)
         menu.addAction(self.act_save)
@@ -633,19 +748,130 @@ class OPDViewer(HyperViewer):
             f"Swing: {(c[0] - c[-1]) / params['wavelength_nm']:.3f} waves\n\n"
             "Previously saved spectra were cleared: they were in intensity units.")
 
-    def revert_to_intensity(self):
-        if self.intensity_cube is None:
+    def load_opd(self):
+        """Load a previously saved OPD stack (.npy, .tif, .tiff, .mat)."""
+        file_types = "All Supported (*.npy *.tif *.tiff *.mat);;NumPy Files (*.npy);;TIFF Files (*.tif *.tiff);;MAT Files (*.mat);;All Files (*.*)"
+        file_path, _ = QFileDialog.getOpenFileName(self, "Load Previously Saved OPD Stack", "", file_types)
+        if not file_path:
             return
-        self.hypercube = self.intensity_cube
-        self.intensity_cube = None
-        self.is_opd = False
-        self.spectra_list = []
-        self.current_selection = None
-        self.update_checkbox_list()
-        self.setup_display()
-        self.act_revert.setEnabled(False)
-        self.act_save.setEnabled(False)
-        self._set_status()
+
+        try:
+            opd_data = self._load_file(file_path)
+            if opd_data is None:
+                return
+
+            opd_data = np.array(opd_data, dtype=np.float32)
+            if opd_data.ndim == 2:
+                opd_data = opd_data[:, :, np.newaxis]
+            elif opd_data.ndim == 3 and opd_data.shape[0] < opd_data.shape[1] and opd_data.shape[0] < opd_data.shape[2]:
+                opd_data = np.transpose(opd_data, (1, 2, 0))
+
+            base_no_ext = os.path.splitext(file_path)[0]
+            volts = None
+            N = opd_data.shape[2]
+            for v_ext in ['.npy', '.csv', '.txt']:
+                v_path = base_no_ext + '_voltages' + v_ext
+                if os.path.exists(v_path):
+                    try:
+                        if v_ext == '.npy':
+                            v = np.load(v_path).astype(float).ravel()
+                        else:
+                            v = np.loadtxt(v_path, delimiter=',' if v_ext == '.csv' else None).astype(float).ravel()
+                        if len(v) == N:
+                            volts = np.sort(v)
+                            break
+                    except Exception:
+                        pass
+
+            self.hypercube = opd_data
+            self.voltages = volts
+            self.is_opd = True
+            self.intensity_cube = None
+            self.setup_display()
+
+            self.act_revert.setEnabled(True)
+            self.act_save.setEnabled(True)
+            self._set_status()
+            self.setWindowTitle(f"OPDViewer - {os.path.basename(file_path)} (OPD Mode)")
+            QMessageBox.information(self, "OPD Loaded", f"Loaded OPD map stack:\n{file_path}\nShape: {opd_data.shape}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load OPD file:\n{e}")
+
+    def revert_to_intensity(self):
+        if not self.is_opd and self.intensity_cube is None:
+            QMessageBox.warning(self, "Warning", "No OPD map or raw intensity stack loaded.")
+            return
+
+        default_wl = getattr(self, 'wavelength_nm', 550.0)
+        dlg = OPDForwardSimDialog(
+            self,
+            has_raw_intensity=(self.intensity_cube is not None),
+            spectra_list=self.spectra_list,
+            default_wl=default_wl
+        )
+
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        if dlg.is_revert_raw():
+            self.hypercube = self.intensity_cube
+            self.intensity_cube = None
+            self.is_opd = False
+            self.spectra_list = []
+            self.current_selection = None
+            self.update_checkbox_list()
+            self.setup_display()
+            self.act_revert.setEnabled(False)
+            self.act_save.setEnabled(False)
+            self._set_status()
+            QMessageBox.information(self, "Reverted", "Reverted to original raw intensity stack.")
+            return
+
+        # Forward Simulation from OPD to Intensity
+        vals = dlg.values()
+        is_poly = vals['is_poly']
+        convention = vals['convention']
+
+        if not is_poly:
+            wavelengths = np.array([vals['wavelength_nm']], dtype=np.float32)
+            weights = np.array([1.0], dtype=np.float32)
+            summary = f"monochromatic wavelength {vals['wavelength_nm']:.1f} nm"
+        else:
+            spec_idx = vals['spectrum_index']
+            if spec_idx == 0 or not self.spectra_list:
+                wavelengths = np.linspace(400.0, 700.0, 31, dtype=np.float32)
+                weights = np.ones(31, dtype=np.float32)
+                summary = "flat spectrum (400 - 700 nm)"
+            else:
+                sdata = self.spectra_list[spec_idx - 1]
+                weights = sdata.spectrum.astype(np.float32)
+                N_bands = len(weights)
+                if hasattr(sdata, 'wavelengths') and sdata.wavelengths is not None and len(sdata.wavelengths) == N_bands:
+                    wavelengths = sdata.wavelengths.astype(np.float32)
+                else:
+                    wavelengths = np.linspace(400.0, 700.0, N_bands, dtype=np.float32)
+                summary = f"spectrum '{sdata.label}' ({N_bands} bands)"
+
+        try:
+            I_sim = opd_to_intensity(self.hypercube, wavelengths, weights, convention=convention)
+            if self.intensity_cube is None:
+                self.intensity_cube = self.hypercube.copy()  # keep current OPD as backup
+            self.hypercube = I_sim
+            self.is_opd = False
+            self.spectra_list = []
+            self.current_selection = None
+            self.update_checkbox_list()
+            self.setup_display()
+            self.act_revert.setEnabled(True)
+            self._set_status()
+            QMessageBox.information(
+                self, "Simulation Complete",
+                f"Converted OPD map back to intensity map stack using {summary}.\n\n"
+                f"Configuration: {convention} (Crossed PBS: 0 at m*lambda, 100% at (m+0.5)*lambda)."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to simulate intensity map:\n{e}")
 
     def save_opd(self):
         if not self.is_opd or self.hypercube is None:

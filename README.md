@@ -30,11 +30,13 @@ An advanced hyperspectral analysis and linear/non-linear unmixing workbench inhe
 - **Composites**: RGB color synthesis and PC-RGB (first 3 Principal Components) pseudo-color mapping.
 
 ### 3. `OPDviewer/OPDViewer.py`
-Extends `HyperViewer` for liquid-crystal retardance measurement and voltage-sweep conversion.
+Extends `HyperViewer` for liquid-crystal retardance measurement, voltage-sweep conversion, and forward physics simulations.
 - **Voltage Metadata Extraction**: Automatically parses per-frame drive voltages ($V$) from TIFF ImageJ metadata (`Labels`) or sidecar files (`_voltages.npy` / `.csv`).
 - **Voltage X-Axis**: Displays **Drive Voltage (V)** on the spectrum plot x-axis instead of arbitrary frame index.
 - **Convert to OPD**: Converts intensity modulation $I(x, y, V)$ into absolute Optical Path Difference $\text{OPD}(x, y, V)$ in nanometers via phase-unwrapping, fold counting, and spatial continuity constraints.
-- **Revert & Save**: Toggle back to raw intensity at any time and export processed OPD cubes as NumPy arrays or TIFF stacks.
+- **Load OPD**: Opens previously saved `.npy`, `.tif`, `.tiff`, or `.mat` OPD stacks.
+- **Revert / Simulate Intensity**: Converts any OPD map stack back to an intensity map stack $I(x, y, V) = \sum_\lambda S(\lambda) \sin^2(\pi \cdot \text{OPD} / \lambda)$ for a monochromatic wavelength $\lambda_0$ or polychromatic illumination spectrum $S(\lambda)$ (crossed or parallel PBS configuration).
+- **Save OPD**: Export processed OPD cubes as NumPy arrays or TIFF stacks.
 
 ---
 
