@@ -36,7 +36,7 @@ Extends `HyperViewer` for liquid-crystal retardance measurement, voltage-sweep c
 - **Convert to OPD**: Converts intensity modulation $I(x, y, V)$ into absolute Optical Path Difference $\text{OPD}(x, y, V)$ in nanometers via phase-unwrapping, fold counting, and spatial continuity constraints.
 - **Load OPD**: Opens previously saved `.npy`, `.tif`, `.tiff`, or `.mat` OPD stacks.
 - **Revert / Simulate Intensity**: Converts any OPD map stack back to an intensity map stack $I(x, y, V) = \sum_\lambda S(\lambda) \sin^2(\pi \cdot \text{OPD} / \lambda)$ for a monochromatic wavelength $\lambda_0$ or polychromatic illumination spectrum $S(\lambda)$ (crossed or parallel PBS configuration).
-- **Save OPD**: Export processed OPD cubes as NumPy arrays or TIFF stacks.
+- **Save OPD**: Exports processed OPD cubes as TIFF stacks with embedded per-frame drive voltage metadata (`Labels`) or NumPy arrays with sidecar `_voltages.npy` files.
 
 ---
 
