@@ -331,7 +331,6 @@ class HyperViewer(QMainWindow):
         self.spectrum_ax.set_ylabel('Intensity')
         self.spectrum_ax.set_title('Extracted Spectra')
         self.spectrum_ax.grid(True, alpha=0.3)
-        self.spectrum_ax.legend(loc='upper right', fontsize=8)
 
         spectrum_layout.addWidget(self.spectrum_canvas)
         right_layout.addWidget(spectrum_group)
