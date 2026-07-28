@@ -38,6 +38,15 @@ Extends `HyperViewer` for liquid-crystal retardance measurement, voltage-sweep c
 - **Revert / Simulate Intensity**: Converts any OPD map stack back to an intensity map stack $I(x, y, V) = \sum_\lambda S(\lambda) \sin^2(\pi \cdot \text{OPD} / \lambda)$ for a monochromatic wavelength $\lambda_0$ or polychromatic illumination spectrum $S(\lambda)$ (crossed or parallel PBS configuration).
 - **Save OPD**: Exports processed OPD cubes as TIFF stacks with embedded per-frame drive voltage metadata (`Labels`) or NumPy arrays with sidecar `_voltages.npy` files.
 
+### 4. `knifedge.py`
+3D Focus Depth & Knife-Edge Sharpness Analysis Application based on `HyperViewer`.
+- **Dual 3D Dataset Loading**: Loads Dataset A (Primary) and Dataset B (Comparison) for focus separation $\Delta Z$ analysis.
+- **Spatial View Switcher**: Toggles 3D spatial rendering between Dataset A and Dataset B (`Spatial 3D: Dataset A | Dataset B`).
+- **Interactive 1D Line Profiles**: Replaces spectrum plot with 1D raw intensity profiles $I(x)$ or $I(y)$ along active crosshair row/column, overlaying Dataset A (solid) and Dataset B (dashed).
+- **Interactive Gaussian Edge Fit Inspector**: Displays 1D edge derivative $|dI/dx|$ alongside fitted Gaussian $g(x) = a \exp(-(x-x_0)^2 / 2\sigma^2) + c$ with fit metrics ($R^2$, center $x_0$, FWHM).
+- **FWHM vs Z Focus Curves**: Plots edge blurring ($\text{FWHM} = 2.35482 \cdot \sigma$) across all $Z$ focus frames, automatically detecting sharpest focus frame $Z_{\text{min}}$ and focus separation $\Delta Z = |Z_{\text{min, A}} - Z_{\text{min, B}}|$.
+- **Full-Grid 2D Focus Map**: Automatically detects grid edges across the image and renders an interpolated 2D heatmap $Z_{\text{min}}(x, y)$.
+
 ---
 
 ## 2. User Interface & Controls

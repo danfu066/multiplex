@@ -436,6 +436,7 @@ class HyperViewer(QMainWindow):
         """Create selection tool toolbar"""
         tool_group = QGroupBox("Selection Tools")
         tool_layout = QHBoxLayout(tool_group)
+        self.tool_layout = tool_layout
         
         self.tool_button_group = QButtonGroup(self)
         self.tool_button_group.setExclusive(True)
