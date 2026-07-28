@@ -160,45 +160,54 @@ class GaussianFitInspectDialog(QDialog):
 
         info_text = []
 
-        # Dataset A
+        # Dataset A Multi-Peak Gaussian Fitting
         if self.profile_a is not None:
             self.ax_profile.plot(self.x_vals, self.profile_a, 'b-', label=f"{self.label_a} Raw I")
-            deriv_a = np.gradient(self.profile_a)
-            self.ax_deriv.plot(self.x_vals, np.abs(deriv_a), 'b.', alpha=0.5, label=f"{self.label_a} |dI/dx|")
+            deriv_a = np.abs(np.gradient(self.profile_a))
+            self.ax_deriv.plot(self.x_vals, deriv_a, 'b.', alpha=0.4, label=f"{self.label_a} |dI/dx|")
 
-            # Peak near crosshair
-            pk_a = self.crosshair_idx
-            peaks_a, _ = signal.find_peaks(np.abs(deriv_a), distance=20)
-            if len(peaks_a) > 0:
-                pk_a = peaks_a[np.argmin(np.abs(peaks_a - self.crosshair_idx))]
+            max_d_a = np.max(deriv_a) if len(deriv_a) > 0 else 0
+            if max_d_a > 0:
+                peaks_a, _ = signal.find_peaks(deriv_a, distance=35, height=max_d_a * 0.15)
+                fitted_count = 0
+                for pk in peaks_a:
+                    fw, popt, r2, x_fit, y_fit = calculate_fwhm(deriv_a, pk, window=win)
+                    if popt is not None and x_fit is not None and np.isfinite(fw) and r2 > 0.2:
+                        lbl_fit = f"{self.label_a} Fits" if fitted_count == 0 else ""
+                        self.ax_deriv.plot(x_fit, y_fit, 'b-', linewidth=2, label=lbl_fit)
+                        info_text.append(
+                            f"<b>{self.label_a} Peak #{fitted_count+1}</b>: Center x0 = <b>{popt[1]:.1f}</b> px | "
+                            f"FWHM = <b>{fw:.2f}</b> px | Amp = {popt[0]:.1f} | R^2 = {r2:.3f}"
+                        )
+                        fitted_count += 1
 
-            fwhm_a, popt_a, r2_a, x_fit_a, y_fit_a = calculate_fwhm(np.abs(deriv_a), pk_a, window=win)
-            if popt_a is not None and x_fit_a is not None:
-                self.ax_deriv.plot(x_fit_a, y_fit_a, 'b-', linewidth=2, label=f"{self.label_a} Gaussian Fit (FWHM={fwhm_a:.2f}px)")
-                info_text.append(f"<b>{self.label_a}</b>: FWHM = {fwhm_a:.2f} px | Center x0 = {popt_a[1]:.1f} px | R² = {r2_a:.3f}")
-
-        # Dataset B
+        # Dataset B Multi-Peak Gaussian Fitting
         if self.profile_b is not None:
             self.ax_profile.plot(self.x_vals, self.profile_b, 'g--', label=f"{self.label_b} Raw I")
-            deriv_b = np.gradient(self.profile_b)
-            self.ax_deriv.plot(self.x_vals, np.abs(deriv_b), 'g.', alpha=0.5, label=f"{self.label_b} |dI/dx|")
+            deriv_b = np.abs(np.gradient(self.profile_b))
+            self.ax_deriv.plot(self.x_vals, deriv_b, 'g.', alpha=0.4, label=f"{self.label_b} |dI/dx|")
 
-            pk_b = self.crosshair_idx
-            peaks_b, _ = signal.find_peaks(np.abs(deriv_b), distance=20)
-            if len(peaks_b) > 0:
-                pk_b = peaks_b[np.argmin(np.abs(peaks_b - self.crosshair_idx))]
+            max_d_b = np.max(deriv_b) if len(deriv_b) > 0 else 0
+            if max_d_b > 0:
+                peaks_b, _ = signal.find_peaks(deriv_b, distance=35, height=max_d_b * 0.15)
+                fitted_count = 0
+                for pk in peaks_b:
+                    fw, popt, r2, x_fit, y_fit = calculate_fwhm(deriv_b, pk, window=win)
+                    if popt is not None and x_fit is not None and np.isfinite(fw) and r2 > 0.2:
+                        lbl_fit = f"{self.label_b} Fits" if fitted_count == 0 else ""
+                        self.ax_deriv.plot(x_fit, y_fit, 'g--', linewidth=2, label=lbl_fit)
+                        info_text.append(
+                            f"<b>{self.label_b} Peak #{fitted_count+1}</b>: Center x0 = <b>{popt[1]:.1f}</b> px | "
+                            f"FWHM = <b>{fw:.2f}</b> px | Amp = {popt[0]:.1f} | R^2 = {r2:.3f}"
+                        )
+                        fitted_count += 1
 
-            fwhm_b, popt_b, r2_b, x_fit_b, y_fit_b = calculate_fwhm(np.abs(deriv_b), pk_b, window=win)
-            if popt_b is not None and x_fit_b is not None:
-                self.ax_deriv.plot(x_fit_b, y_fit_b, 'g--', linewidth=2, label=f"{self.label_b} Gaussian Fit (FWHM={fwhm_b:.2f}px)")
-                info_text.append(f"<b>{self.label_b}</b>: FWHM = {fwhm_b:.2f} px | Center x0 = {popt_b[1]:.1f} px | R² = {r2_b:.3f}")
-
-        self.ax_profile.set_title(f"1D Raw Intensity Profile (Crosshair={self.crosshair_idx} px)")
+        self.ax_profile.set_title(f"1D Raw Intensity Line Profile (Crosshair={self.crosshair_idx} px)")
         self.ax_profile.set_ylabel("Intensity")
         self.ax_profile.legend(loc='upper right', fontsize=8)
         self.ax_profile.grid(True, alpha=0.3)
 
-        self.ax_deriv.set_title("Edge Derivative |dI/dx| & Gaussian Curve Fit Overlay")
+        self.ax_deriv.set_title("Edge Derivative |dI/dx| & Multi-Peak Gaussian Fits")
         self.ax_deriv.set_xlabel("Pixel Coordinate (px)")
         self.ax_deriv.set_ylabel("|dI/dx|")
         self.ax_deriv.legend(loc='upper right', fontsize=8)
@@ -207,7 +216,7 @@ class GaussianFitInspectDialog(QDialog):
         self.fig.tight_layout()
         self.canvas.draw()
 
-        self.info_label.setText("<br>".join(info_text) if info_text else "No valid Gaussian fit obtained.")
+        self.info_label.setText("<br>".join(info_text) if info_text else "No valid Gaussian fits obtained for detected peaks.")
 
 
 class KnifeEdgeViewer(HyperViewer):
@@ -307,6 +316,19 @@ class KnifeEdgeViewer(HyperViewer):
         right_widget = self.spectrum_canvas.parentWidget()
         if right_widget is not None and right_widget.layout() is not None:
             right_widget.layout().addWidget(fit_group)
+
+        # Re-label Titles to Line Plot & Line Management
+        for gb in self.findChildren(QGroupBox):
+            if gb.title() == "Spectrum Plot":
+                gb.setTitle("Line Plot")
+            elif gb.title() == "Spectrum Management":
+                gb.setTitle("Line Management")
+
+        if hasattr(self, 'export_btn'):
+            self.export_btn.setText("Export Line Plots")
+        if hasattr(self, 'add_btn'):
+            self.add_btn.setText("Add Current Selection")
+            self.add_btn.setEnabled(True)
 
     # ---------------- Dataset Loading & Switching ----------------
 
@@ -421,8 +443,80 @@ class KnifeEdgeViewer(HyperViewer):
         self.spectrum_ax.set_ylabel("Raw Intensity I")
         self.spectrum_ax.set_title(lbl_title if 'lbl_title' in locals() else "1D Line Profile")
         self.spectrum_ax.grid(True, alpha=0.3)
+
+        # Plot saved line selections
+        if hasattr(self, 'spectra_list') and self.spectra_list:
+            for sp in self.spectra_list:
+                if sp.visible:
+                    x_vals = np.arange(len(sp.spectrum))
+                    self.spectrum_ax.plot(x_vals, sp.spectrum, color=sp.color, linewidth=1.5, linestyle=':', label=sp.label)
+
         self.spectrum_ax.legend(loc='upper right', fontsize=8)
         self.spectrum_canvas.draw_idle()
+
+    def add_current_spectrum(self):
+        """Add current 1D line profile selection to Line Management list."""
+        if self.dataset_a is None and self.dataset_b is None:
+            return
+
+        z_frame = self.current_frame
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2']
+        color = colors[len(self.spectra_list) % len(colors)]
+
+        # Dataset A profile
+        if self.dataset_a is not None and z_frame < self.dataset_a.shape[2]:
+            H, W, Z = self.dataset_a.shape
+            if self.profile_mode == "X":
+                y = int(np.clip(self.crosshair_y, 0, H - 1))
+                prof = self.dataset_a[y, :, z_frame]
+                lbl = f"{self.name_a} X-Line (Y={y}, Z={z_frame})"
+            else:
+                x = int(np.clip(self.crosshair_x, 0, W - 1))
+                prof = self.dataset_a[:, x, z_frame]
+                lbl = f"{self.name_a} Y-Line (X={x}, Z={z_frame})"
+
+            from HyperViewer import SpectrumData
+            sp_a = SpectrumData(
+                spectrum=prof,
+                label=lbl,
+                color=color,
+                selection_type='line',
+                coords=(self.crosshair_x, self.crosshair_y)
+            )
+            self.spectra_list.append(sp_a)
+
+        # Dataset B profile
+        if self.dataset_b is not None and z_frame < self.dataset_b.shape[2]:
+            H, W, Z = self.dataset_b.shape
+            if self.profile_mode == "X":
+                y = int(np.clip(self.crosshair_y, 0, H - 1))
+                prof = self.dataset_b[y, :, z_frame]
+                lbl = f"{self.name_b} X-Line (Y={y}, Z={z_frame})"
+            else:
+                x = int(np.clip(self.crosshair_x, 0, W - 1))
+                prof = self.dataset_b[:, x, z_frame]
+                lbl = f"{self.name_b} Y-Line (X={x}, Z={z_frame})"
+
+            from HyperViewer import SpectrumData
+            sp_b = SpectrumData(
+                spectrum=prof,
+                label=lbl,
+                color=color,
+                selection_type='line',
+                coords=(self.crosshair_x, self.crosshair_y)
+            )
+            self.spectra_list.append(sp_b)
+
+        self.update_spectrum_plot()
+        self.update_checkbox_list()
+        if hasattr(self, 'delete_btn'):
+            self.delete_btn.setEnabled(True)
+        if hasattr(self, 'export_btn'):
+            self.export_btn.setEnabled(True)
+
+    def update_spectrum_plot(self):
+        """Update spectrum/line plot."""
+        self.update_line_profile_plot()
 
     # ---------------- Local Edge Fitting & Inspection ----------------
 
