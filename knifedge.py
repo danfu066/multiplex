@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QRadioButton, QButtonGroup,
     QGroupBox, QFileDialog, QMessageBox, QProgressDialog, QSplitter, QFrame, QAction, QDialog,
-    QDialogButtonBox
+    QDialogButtonBox, QTextEdit
 )
 
 import matplotlib
@@ -33,6 +33,7 @@ from matplotlib.figure import Figure
 from scipy import signal
 from scipy.optimize import curve_fit
 from scipy.interpolate import griddata
+from scipy.ndimage import gaussian_filter1d
 
 try:
     import tifffile
@@ -54,9 +55,11 @@ def gaussian_func(x, a, x0, sigma, offset):
     return a * np.exp(-((x - x0) ** 2) / (2.0 * sigma ** 2)) + offset
 
 
-def calculate_fwhm(signal_1d, peak_idx, window=25):
-    """Fit a Gaussian curve to a 1D derivative signal around peak_idx and return (fwhm, popt, r2, x_fit, y_fit)."""
+def calculate_fwhm(signal_1d, peak_idx, window=25, smooth_sigma=0.0):
+    """Fit a Gaussian curve to a 1D derivative signal around peak_idx with optional noise smoothing."""
     signal_1d = np.asarray(signal_1d, dtype=float)
+    if smooth_sigma > 0:
+        signal_1d = gaussian_filter1d(signal_1d, sigma=smooth_sigma)
     N = len(signal_1d)
     if N < 5:
         return np.nan, None, 0.0, None, None
@@ -290,29 +293,70 @@ class KnifeEdgeViewer(HyperViewer):
         if plot_toolbar_layout is not None:
             plot_toolbar_layout.insertLayout(0, profile_toggle_layout)
 
-        # Fit Controls Group
+        # Fit Controls Group: Step-by-Step Edge Fitting & Focus Analysis
         fit_group = QGroupBox("Edge Fitting & Focus Analysis")
         fit_layout = QVBoxLayout(fit_group)
 
-        row_win = QHBoxLayout()
-        row_win.addWidget(QLabel("Gaussian Fit Window (px):"))
+        # Config Row: Fit Window & Noise Smoothing
+        row_cfg = QHBoxLayout()
+        row_cfg.addWidget(QLabel("Fit Window (px):"))
         self.fit_win_spin = QSpinBox()
         self.fit_win_spin.setRange(5, 150)
         self.fit_win_spin.setValue(25)
-        row_win.addWidget(self.fit_win_spin)
-        fit_layout.addLayout(row_win)
+        row_cfg.addWidget(self.fit_win_spin)
 
-        self.btn_inspect_fit = QPushButton("🔍 Inspect & Fit Local Edge (Crosshair)")
-        self.btn_inspect_fit.setToolTip("Opens interactive Gaussian fit inspector and plots FWHM vs Z focus curves")
+        row_cfg.addWidget(QLabel("Smooth Sigma (px):"))
+        self.smooth_sigma_spin = QDoubleSpinBox()
+        self.smooth_sigma_spin.setRange(0.0, 10.0)
+        self.smooth_sigma_spin.setSingleStep(0.5)
+        self.smooth_sigma_spin.setValue(2.0)
+        self.smooth_sigma_spin.setToolTip("Gaussian noise smoothing filter for high-noise real data")
+        row_cfg.addWidget(self.smooth_sigma_spin)
+        fit_layout.addLayout(row_cfg)
+
+        # Step 1 & 2 Action Buttons
+        row_btns1 = QHBoxLayout()
+        self.btn_differential = QPushButton("1. Differential (dI/dx)")
+        self.btn_differential.setToolTip("Computes 1D derivative profile |dI/dx| with noise smoothing and updates plot")
+        self.btn_differential.clicked.connect(self.run_differential_step)
+        row_btns1.addWidget(self.btn_differential)
+
+        self.btn_gaussian_fit = QPushButton("2. Gaussian Fit")
+        self.btn_gaussian_fit.setToolTip("Finds edge peaks, fits Gaussian curves, and outputs peak centers & FWHM widths")
+        self.btn_gaussian_fit.clicked.connect(self.run_gaussian_fit_step)
+        row_btns1.addWidget(self.btn_gaussian_fit)
+        fit_layout.addLayout(row_btns1)
+
+        # Step 3 & 4 Action Buttons
+        row_btns2 = QHBoxLayout()
+        self.btn_inspect_fit = QPushButton("3. Focus Curve (FWHM vs Z)")
+        self.btn_inspect_fit.setToolTip("Evaluates FWHM(Z) curves across frames Z and computes focus separation ΔZ")
         self.btn_inspect_fit.clicked.connect(self.fit_local_edge_with_preview)
-        fit_layout.addWidget(self.btn_inspect_fit)
+        row_btns2.addWidget(self.btn_inspect_fit)
 
-        self.btn_grid_map = QPushButton("🗺️ Grid Focus Map (Full Image Analysis)")
+        self.btn_grid_map = QPushButton("4. Grid Focus Map")
         self.btn_grid_map.setToolTip("Runs automated grid line analysis and plots 2D sharpest focus map Z_min(x,y)")
         self.btn_grid_map.clicked.connect(self.run_grid_focus_map)
-        fit_layout.addWidget(self.btn_grid_map)
+        row_btns2.addWidget(self.btn_grid_map)
+        fit_layout.addLayout(row_btns2)
 
-        # Replace spectrum management controls with edge fitting group
+        # Text Output Window Log
+        fit_layout.addWidget(QLabel("Analysis Results Log:"))
+        self.log_text_window = QTextEdit()
+        self.log_text_window.setReadOnly(True)
+        self.log_text_window.setMaximumHeight(150)
+        self.log_text_window.setFont(QFont("Consolas", 9))
+        self.log_text_window.setPlaceholderText("Analysis results log will appear here step-by-step...")
+        fit_layout.addWidget(self.log_text_window)
+
+        row_log_ctrl = QHBoxLayout()
+        btn_clear_log = QPushButton("Clear Log")
+        btn_clear_log.clicked.connect(self.log_text_window.clear)
+        row_log_ctrl.addStretch()
+        row_log_ctrl.addWidget(btn_clear_log)
+        fit_layout.addLayout(row_log_ctrl)
+
+        # Add Edge Fitting Group to Right Panel
         right_widget = self.spectrum_canvas.parentWidget()
         if right_widget is not None and right_widget.layout() is not None:
             right_widget.layout().addWidget(fit_group)
@@ -329,6 +373,18 @@ class KnifeEdgeViewer(HyperViewer):
         if hasattr(self, 'add_btn'):
             self.add_btn.setText("Add Current Selection")
             self.add_btn.setEnabled(True)
+
+        # Hide Unwanted Background & Reference Spectra UI Elements
+        unwanted_names = [
+            'set_bg_btn', 'subtract_bg_btn', 'bg_status_label',
+            'load_ref_btn', 'transform_ref_btn', 'save_ref_btn',
+            'ref_status_label', 'ref_text_box', 'bg_text_box'
+        ]
+        for name in unwanted_names:
+            if hasattr(self, name):
+                w = getattr(self, name)
+                if w is not None and isinstance(w, QWidget):
+                    w.hide()
 
     # ---------------- Dataset Loading & Switching ----------------
 
@@ -518,6 +574,126 @@ class KnifeEdgeViewer(HyperViewer):
         """Update spectrum/line plot."""
         self.update_line_profile_plot()
 
+    def log_msg(self, msg):
+        """Append log message to the Text Output Window."""
+        if hasattr(self, 'log_text_window') and self.log_text_window is not None:
+            self.log_text_window.append(msg)
+
+    def run_differential_step(self):
+        """Step 1: Compute 1D derivative profile |dI/dx| with noise smoothing and update plot."""
+        if self.dataset_a is None and self.dataset_b is None:
+            QMessageBox.warning(self, "Warning", "Please load a dataset first.")
+            return
+
+        z_frame = self.current_frame
+        smooth_sigma = self.smooth_sigma_spin.value()
+        self.spectrum_ax.clear()
+
+        cross_idx = self.crosshair_x if self.profile_mode == "X" else self.crosshair_y
+        self.log_msg(f"=== Step 1: Differential |dI/dx| (Mode={self.profile_mode}, Crosshair={cross_idx}px, Z={z_frame}, Smooth={smooth_sigma:.1f}px) ===")
+
+        # Dataset A Differential
+        if self.dataset_a is not None and z_frame < self.dataset_a.shape[2]:
+            H, W, Z = self.dataset_a.shape
+            prof_a = self.dataset_a[int(np.clip(self.crosshair_y, 0, H-1)), :, z_frame] if self.profile_mode == "X" else self.dataset_a[:, int(np.clip(self.crosshair_x, 0, W-1)), z_frame]
+            deriv_a = np.abs(np.gradient(prof_a))
+            if smooth_sigma > 0:
+                deriv_a = gaussian_filter1d(deriv_a, sigma=smooth_sigma)
+            x_vals = np.arange(len(deriv_a))
+            self.spectrum_ax.plot(x_vals, deriv_a, 'b-', label=f"{self.name_a} |dI/dx|")
+            self.log_msg(f"  {self.name_a}: Max Derivative = {np.max(deriv_a):.2f}")
+
+        # Dataset B Differential
+        if self.dataset_b is not None and z_frame < self.dataset_b.shape[2]:
+            H, W, Z = self.dataset_b.shape
+            prof_b = self.dataset_b[int(np.clip(self.crosshair_y, 0, H-1)), :, z_frame] if self.profile_mode == "X" else self.dataset_b[:, int(np.clip(self.crosshair_x, 0, W-1)), z_frame]
+            deriv_b = np.abs(np.gradient(prof_b))
+            if smooth_sigma > 0:
+                deriv_b = gaussian_filter1d(deriv_b, sigma=smooth_sigma)
+            x_vals = np.arange(len(deriv_b))
+            self.spectrum_ax.plot(x_vals, deriv_b, 'g--', label=f"{self.name_b} |dI/dx|")
+            self.log_msg(f"  {self.name_b}: Max Derivative = {np.max(deriv_b):.2f}")
+
+        self.spectrum_ax.set_xlabel("Pixel Position (px)")
+        self.spectrum_ax.set_ylabel("|dI/dx| Edge Derivative")
+        self.spectrum_ax.set_title(f"1D Edge Differential |dI/dx| (Frame Z={z_frame})")
+        self.spectrum_ax.grid(True, alpha=0.3)
+        self.spectrum_ax.legend(loc='upper right', fontsize=8)
+        self.spectrum_canvas.draw_idle()
+
+    def run_gaussian_fit_step(self):
+        """Step 2: Detect derivative peaks, fit Gaussian curves, overlay on plot, and log results."""
+        if self.dataset_a is None and self.dataset_b is None:
+            QMessageBox.warning(self, "Warning", "Please load a dataset first.")
+            return
+
+        z_frame = self.current_frame
+        win = self.fit_win_spin.value()
+        smooth_sigma = self.smooth_sigma_spin.value()
+
+        self.spectrum_ax.clear()
+        cross_idx = self.crosshair_x if self.profile_mode == "X" else self.crosshair_y
+        self.log_msg(f"=== Step 2: Multi-Peak Gaussian Fit (Window={win}px, Smooth={smooth_sigma:.1f}px, Z={z_frame}) ===")
+
+        # Dataset A Multi-Peak Gaussian Fit
+        if self.dataset_a is not None and z_frame < self.dataset_a.shape[2]:
+            H, W, Z = self.dataset_a.shape
+            prof_a = self.dataset_a[int(np.clip(self.crosshair_y, 0, H-1)), :, z_frame] if self.profile_mode == "X" else self.dataset_a[:, int(np.clip(self.crosshair_x, 0, W-1)), z_frame]
+            deriv_a = np.abs(np.gradient(prof_a))
+            if smooth_sigma > 0:
+                deriv_a = gaussian_filter1d(deriv_a, sigma=smooth_sigma)
+
+            x_vals = np.arange(len(deriv_a))
+            self.spectrum_ax.plot(x_vals, deriv_a, 'b.', alpha=0.4, label=f"{self.name_a} |dI/dx|")
+
+            max_d_a = np.max(deriv_a) if len(deriv_a) > 0 else 0
+            if max_d_a > 0:
+                peaks_a, _ = signal.find_peaks(deriv_a, distance=35, height=max_d_a * 0.15)
+                fitted_count = 0
+                for pk in peaks_a:
+                    fw, popt, r2, x_fit, y_fit = calculate_fwhm(deriv_a, pk, window=win)
+                    if popt is not None and x_fit is not None and np.isfinite(fw) and r2 > 0.2:
+                        lbl_fit = f"{self.name_a} Fits" if fitted_count == 0 else ""
+                        self.spectrum_ax.plot(x_fit, y_fit, 'b-', linewidth=2, label=lbl_fit)
+                        self.log_msg(
+                            f"  {self.name_a} Peak #{fitted_count+1}: Center x0 = {popt[1]:.1f} px | "
+                            f"FWHM = {fw:.2f} px | Amp = {popt[0]:.1f} | R^2 = {r2:.3f}"
+                        )
+                        fitted_count += 1
+
+        # Dataset B Multi-Peak Gaussian Fit
+        if self.dataset_b is not None and z_frame < self.dataset_b.shape[2]:
+            H, W, Z = self.dataset_b.shape
+            prof_b = self.dataset_b[int(np.clip(self.crosshair_y, 0, H-1)), :, z_frame] if self.profile_mode == "X" else self.dataset_b[:, int(np.clip(self.crosshair_x, 0, W-1)), z_frame]
+            deriv_b = np.abs(np.gradient(prof_b))
+            if smooth_sigma > 0:
+                deriv_b = gaussian_filter1d(deriv_b, sigma=smooth_sigma)
+
+            x_vals = np.arange(len(deriv_b))
+            self.spectrum_ax.plot(x_vals, deriv_b, 'g.', alpha=0.4, label=f"{self.name_b} |dI/dx|")
+
+            max_d_b = np.max(deriv_b) if len(deriv_b) > 0 else 0
+            if max_d_b > 0:
+                peaks_b, _ = signal.find_peaks(deriv_b, distance=35, height=max_d_b * 0.15)
+                fitted_count = 0
+                for pk in peaks_b:
+                    fw, popt, r2, x_fit, y_fit = calculate_fwhm(deriv_b, pk, window=win)
+                    if popt is not None and x_fit is not None and np.isfinite(fw) and r2 > 0.2:
+                        lbl_fit = f"{self.name_b} Fits" if fitted_count == 0 else ""
+                        self.spectrum_ax.plot(x_fit, y_fit, 'g--', linewidth=2, label=lbl_fit)
+                        self.log_msg(
+                            f"  {self.name_b} Peak #{fitted_count+1}: Center x0 = {popt[1]:.1f} px | "
+                            f"FWHM = {fw:.2f} px | Amp = {popt[0]:.1f} | R^2 = {r2:.3f}"
+                        )
+                        fitted_count += 1
+
+        self.spectrum_ax.set_xlabel("Pixel Position (px)")
+        self.spectrum_ax.set_ylabel("|dI/dx| Edge Derivative")
+        self.spectrum_ax.set_title(f"1D Multi-Peak Gaussian Edge Fits (Frame Z={z_frame})")
+        self.spectrum_ax.grid(True, alpha=0.3)
+        self.spectrum_ax.legend(loc='upper right', fontsize=8)
+        self.spectrum_canvas.draw_idle()
+
     # ---------------- Local Edge Fitting & Inspection ----------------
 
     def fit_local_edge_with_preview(self):
@@ -606,6 +782,7 @@ class KnifeEdgeViewer(HyperViewer):
         ax = fig.add_subplot(111)
 
         summary_msgs = []
+        self.log_msg(f"=== Step 3: Focus Depth Curve FWHM(Z) Results ===")
 
         if fwhm_list_a:
             arr_a = np.array(fwhm_list_a)
@@ -616,6 +793,7 @@ class KnifeEdgeViewer(HyperViewer):
                 min_fwhm_a = arr_a[z_min_a]
                 ax.axvline(z_min_a, color='b', linestyle=':', label=f"{self.name_a} Sharpest Focus Z={z_min_a}")
                 summary_msgs.append(f"<b>{self.name_a}</b>: Sharpest Focus at Frame <b>Z = {z_min_a}</b> (Min FWHM = {min_fwhm_a:.2f} px)")
+                self.log_msg(f"  {self.name_a}: Sharpest Focus at Frame Z = {z_min_a} (Min FWHM = {min_fwhm_a:.2f} px)")
 
         if fwhm_list_b:
             arr_b = np.array(fwhm_list_b)
@@ -626,10 +804,12 @@ class KnifeEdgeViewer(HyperViewer):
                 min_fwhm_b = arr_b[z_min_b]
                 ax.axvline(z_min_b, color='g', linestyle=':', label=f"{self.name_b} Sharpest Focus Z={z_min_b}")
                 summary_msgs.append(f"<b>{self.name_b}</b>: Sharpest Focus at Frame <b>Z = {z_min_b}</b> (Min FWHM = {min_fwhm_b:.2f} px)")
+                self.log_msg(f"  {self.name_b}: Sharpest Focus at Frame Z = {z_min_b} (Min FWHM = {min_fwhm_b:.2f} px)")
 
         if 'z_min_a' in locals() and 'z_min_b' in locals():
             delta_z = abs(z_min_a - z_min_b)
             summary_msgs.append(f"<b>Focus Separation ΔZ</b> = <b>{delta_z} frames</b> (Z_a={z_min_a} vs Z_b={z_min_b})")
+            self.log_msg(f"  Focus Separation ΔZ = {delta_z} frames (Z_a={z_min_a} vs Z_b={z_min_b})")
 
         ax.set_xlabel("Z Focus Depth Frame Index")
         ax.set_ylabel("Edge Blurring FWHM (px)")
