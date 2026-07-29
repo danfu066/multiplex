@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Dan Fu@UW
 """
 unmix — Hyperspectral unmixing, denoising, and classification algorithms.
 

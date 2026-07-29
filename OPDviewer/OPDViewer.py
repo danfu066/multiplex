@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Dan Fu@UW
 """
 OPDViewer: HyperViewer + voltage-to-OPD conversion
 ==================================================

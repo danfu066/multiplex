@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Dan Fu@UW
 """
 HyperViewer: Hyperspectral Image Viewer
 ========================================

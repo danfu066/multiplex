@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Dan Fu@UW
 """
 Classification and decomposition algorithms.
 

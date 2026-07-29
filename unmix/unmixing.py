@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Dan Fu@UW
 """
 Blind-source-separation / unmixing algorithms.
 

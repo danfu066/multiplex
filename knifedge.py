@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Dan Fu@UW
 """
 knifedge.py - 3D Focus & Knife-Edge Sharpness Analysis Tool
 
