@@ -42,9 +42,15 @@ Extends `HyperViewer` for liquid-crystal retardance measurement, voltage-sweep c
 3D Focus Depth & Knife-Edge Sharpness Analysis Application based on `HyperViewer`.
 - **Dual 3D Dataset Loading**: Loads Dataset A (Primary) and Dataset B (Comparison) for focus separation $\Delta Z$ analysis.
 - **Spatial View Switcher**: Toggles 3D spatial rendering between Dataset A and Dataset B (`Spatial 3D: Dataset A | Dataset B`).
-- **Interactive 1D Line Profiles**: Replaces spectrum plot with 1D raw intensity profiles $I(x)$ or $I(y)$ along active crosshair row/column, overlaying Dataset A (solid) and Dataset B (dashed).
-- **Interactive Gaussian Edge Fit Inspector**: Displays 1D edge derivative $|dI/dx|$ alongside fitted Gaussian $g(x) = a \exp(-(x-x_0)^2 / 2\sigma^2) + c$ with fit metrics ($R^2$, center $x_0$, FWHM).
-- **FWHM vs Z Focus Curves**: Plots edge blurring ($\text{FWHM} = 2.35482 \cdot \sigma$) across all $Z$ focus frames, automatically detecting sharpest focus frame $Z_{\text{min}}$ and focus separation $\Delta Z = |Z_{\text{min, A}} - Z_{\text{min, B}}|$.
+- **Interactive 1D Line Profiles & Rectangle ROIs**: Extracts 1D raw intensity profiles $I(x)$ or $I(y)$ along active crosshair row/column or rectangular ribbon ROIs with automatic ribbon averaging.
+- **Physical Spatial Calibration ($\mu\text{m}$ Scale)**: Inputs spatial pixel sizes ($X, Y, Z$ in $\mu\text{m}$) directly on the image navigation toolbar to scale 1D line profile axes, fitted edge centers $x_0$, FWHM measurements, and $Z$ focus depth curves into physical units ($\mu\text{m}$).
+- **Automatic Parameter Memory (`QSettings`)**: Persistent session memory that automatically saves and reloads **Fit Window**, **Min Edge Distance**, **Peak Height Threshold**, **Pixel Sizes ($X, Y, Z$)**, **Line Width**, **Smooth Sigma**, and **Fit Model** across application restarts.
+- **Theoretical Knife-Edge & High-NA Optics Calculator**: Action button launching a theoretical diffraction pop-up supporting:
+  - *Airy Disk / Circular Aperture (Realistic High NA)*: $w_0 = 0.514 \lambda / \text{NA}$, $\text{FWHM}_0 = 0.510 \lambda / \text{NA}$.
+  - *Richards-Wolf Vectorial Diffraction (High NA $\ge 0.70$)*: Includes depolarization scaling factor $\sqrt{1 - 0.25 (\text{NA}/n)^2}$.
+  - *Paraxial Untruncated Gaussian (Idealized)*: $w_0 = \lambda / (\pi \cdot \text{NA})$.
+- **Multi-Edge FWHM vs Z Focus Curves**: Plots edge blurring ($\text{FWHM}$) across all $Z$ focus frames using high-contrast colors (`#D32F2F`, `#1976D2`, `#F57C00`) and clean circle markers (`o-` / `o--`), automatically detecting sharpest focus position $Z_{\text{focus}}$ and focus separation $\Delta Z$.
+- **Plot & Data Export (PNG, SVG, CSV)**: Dedicated export buttons for theoretical diffraction curves and experimental focus depth curves, saving high-resolution PNG/SVG figures or raw CSV numerical data tables.
 - **Full-Grid 2D Focus Map**: Automatically detects grid edges across the image and renders an interpolated 2D heatmap $Z_{\text{min}}(x, y)$.
 
 ---
@@ -65,7 +71,10 @@ Select an ROI tool from the left panel:
 - **Add Current Selection**: Saves the active ROI to the spectrum list and renders its open outline marker permanently on the spatial image.
 - **Delete / Visibility**: Check/uncheck boxes to toggle individual spectrum visibility, click `×` to delete single spectra, or click **Delete Selected** to clear multiple selections. All spatial markers update in real time.
 
-### Spatial View Navigation & Color Controls (Bottom Bar)
+### Frame Navigation & Spatial Calibration Toolbar (Bottom Bar)
+- **Step Arrow Buttons (◀ / ▶)**: Step forward or backward by single frames/Z-planes using mouse or arrow buttons.
+- **Horizontal Slider & Direct Spinbox**: Drag the slider or type an exact frame index into the numeric spinbox to jump directly to any frame.
+- **Spatial Calibration Inputs ($X, Y, Z$ in $\mu\text{m}$)**: Enter physical pixel sizes ($X$, $Y$ in $\mu\text{m}/\text{px}$) and $Z$ step size ($\mu\text{m}/\text{frame}$) to automatically convert all line profile positions, FWHM edge blur widths, and focus depth curves to physical micrometers ($\mu\text{m}$).
 - **Built-in Matplotlib Zoom & Pan**: Integrated navigation toolbar directly under the spatial canvas providing rubber-band **Zoom 🔍** and hand **Pan ✋** tools for interactive spatial exploration.
 - **Unified Views**: Changing the colormap (e.g. `gray`, `viridis`, `plasma`, `jet`, `inferno`) applies the colormap and exact intensity limits simultaneously across **XY spatial view**, **XZ top side view**, and **YZ left side view**.
 - **Editable Color Limits (`C-Min` / `C-Max`)**: Type or adjust values in `C-Min` and `C-Max` spinboxes at the bottom of the spatial view to manually set contrast and color mapping limits across all 3 views and the colorbar.
@@ -75,11 +84,6 @@ Select an ROI tool from the left panel:
 - **Compact Dropdown Button**: Single `Resample ▾` dropdown button on the top toolbar for rapid spatial resolution scaling.
 - **Downscale (1/2, 1/3, 1/4)**: Uses $k \times k$ block-averaging to reduce spatial dimensions, shrinking pixel count by up to 16x and accelerating unmixing and OPD calculations by up to 1600%.
 - **Upscale (2x, 3x, 4x)**: Uses spatial bilinear interpolation to enlarge the image grid.
-
-### Spectrum Plot Controls
-- **🔒 Lock Axes**: Freezes current $X$ and $Y$ axis limits during frame switching.
-- **⤡ Autoscale**: Automatically scales spectrum plot axes to fit all visible spectra with a 5% margin.
-- **🔍 Zoom**: Toggles interactive rectangle zoom on the spectrum plot.
 
 ---
 
@@ -101,10 +105,13 @@ Run any viewer directly from PowerShell or Command Prompt:
 # 1. Launch Hyperspectral Unmixing Workbench
 python unmix\Unmixer.py
 
-# 2. Launch Hyperspectral Image Viewer
+# 2. Launch 3D Knife-Edge Focus Sharpness Analysis
+python knifedge.py
+
+# 3. Launch Hyperspectral Image Viewer
 python HyperViewer.py
 
-# 3. Launch Liquid Crystal OPD Retardance Viewer
+# 4. Launch Liquid Crystal OPD Retardance Viewer
 python OPDviewer\OPDViewer.py
 ```
 
