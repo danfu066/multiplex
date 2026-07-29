@@ -116,6 +116,12 @@ class SelectionOverlay:
         self.patches.append(square)
         self.ax.figure.canvas.draw_idle()
 
+    def add_rectangle(self, x, y, width, height, color='cyan'):
+        rect = Rectangle((x, y), width, height, fill=False, color=color, linewidth=2, linestyle='-')
+        self.ax.add_patch(rect)
+        self.patches.append(rect)
+        self.ax.figure.canvas.draw_idle()
+
 
 class HyperViewer(QMainWindow):
     """Main HyperViewer Application"""
@@ -260,8 +266,14 @@ class HyperViewer(QMainWindow):
         self.vmax_spinbox.valueChanged.connect(self.on_clim_changed)
         color_bar_layout.addWidget(self.vmax_spinbox)
 
-        self.auto_clim_btn = QPushButton("Auto Scale")
-        self.auto_clim_btn.setToolTip("Reset color scale to auto min/max of current frame")
+        self.auto_clim_cb = QCheckBox("Auto Scale")
+        self.auto_clim_cb.setToolTip("Uncheck to turn off autoscale and lock custom C-Min / C-Max contrast numbers across all frames")
+        self.auto_clim_cb.setChecked(False)
+        self.auto_clim_cb.stateChanged.connect(self.on_autoscale_toggled)
+        color_bar_layout.addWidget(self.auto_clim_cb)
+
+        self.auto_clim_btn = QPushButton("Reset Auto")
+        self.auto_clim_btn.setToolTip("Reset C-Min / C-Max color scale to min/max of current frame")
         self.auto_clim_btn.clicked.connect(self.reset_clim_auto)
         color_bar_layout.addWidget(self.auto_clim_btn)
 
@@ -270,17 +282,81 @@ class HyperViewer(QMainWindow):
 
         left_layout.addWidget(image_group)
         
-        # Slider for spectral frames
-        slider_group = QGroupBox("Spectral Frame")
-        slider_layout = QVBoxLayout(slider_group)
-        
+        # Slider for spectral frames with step arrow buttons & direct spinbox
+        slider_group = QGroupBox("Spectral Frame / Focus Z")
+        slider_vlayout = QVBoxLayout(slider_group)
+
+        slider_hlayout = QHBoxLayout()
+
+        self.btn_prev_frame = QPushButton("◀")
+        self.btn_prev_frame.setToolTip("Previous Frame (Left Arrow)")
+        self.btn_prev_frame.setFixedWidth(35)
+        self.btn_prev_frame.clicked.connect(self.prev_frame)
+        slider_hlayout.addWidget(self.btn_prev_frame)
+
         self.frame_slider = QSlider(Qt.Horizontal)
+        self.frame_slider.setSingleStep(1)
+        self.frame_slider.setPageStep(1)
         self.frame_slider.valueChanged.connect(self.on_frame_changed)
-        slider_layout.addWidget(self.frame_slider)
-        
+        slider_hlayout.addWidget(self.frame_slider)
+
+        self.btn_next_frame = QPushButton("▶")
+        self.btn_next_frame.setToolTip("Next Frame (Right Arrow)")
+        self.btn_next_frame.setFixedWidth(35)
+        self.btn_next_frame.clicked.connect(self.next_frame)
+        slider_hlayout.addWidget(self.btn_next_frame)
+
+        self.frame_spinbox = QSpinBox()
+        self.frame_spinbox.setRange(0, 0)
+        self.frame_spinbox.setFixedWidth(65)
+        self.frame_spinbox.setToolTip("Type exact frame / Z index")
+        self.frame_spinbox.valueChanged.connect(self.on_frame_spinbox_changed)
+        slider_hlayout.addWidget(self.frame_spinbox)
+
+        # Pixel Size Spatial Calibration Boxes (X, Y, Z in µm)
+        slider_hlayout.addSpacing(12)
+        lbl_cal = QLabel("<b>Pixel Size (µm):</b>")
+        lbl_cal.setToolTip("Spatial calibration pixel sizes in micrometers (µm)")
+        slider_hlayout.addWidget(lbl_cal)
+
+        slider_hlayout.addWidget(QLabel("X:"))
+        self.pixel_size_x_spin = QDoubleSpinBox()
+        self.pixel_size_x_spin.setRange(0.0001, 10000.0)
+        self.pixel_size_x_spin.setValue(1.0)
+        self.pixel_size_x_spin.setSingleStep(0.1)
+        self.pixel_size_x_spin.setDecimals(3)
+        self.pixel_size_x_spin.setFixedWidth(65)
+        self.pixel_size_x_spin.setToolTip("X pixel size in micrometers (µm/px)")
+        self.pixel_size_x_spin.valueChanged.connect(self.on_calibration_changed)
+        slider_hlayout.addWidget(self.pixel_size_x_spin)
+
+        slider_hlayout.addWidget(QLabel("Y:"))
+        self.pixel_size_y_spin = QDoubleSpinBox()
+        self.pixel_size_y_spin.setRange(0.0001, 10000.0)
+        self.pixel_size_y_spin.setValue(1.0)
+        self.pixel_size_y_spin.setSingleStep(0.1)
+        self.pixel_size_y_spin.setDecimals(3)
+        self.pixel_size_y_spin.setFixedWidth(65)
+        self.pixel_size_y_spin.setToolTip("Y pixel size in micrometers (µm/px)")
+        self.pixel_size_y_spin.valueChanged.connect(self.on_calibration_changed)
+        slider_hlayout.addWidget(self.pixel_size_y_spin)
+
+        slider_hlayout.addWidget(QLabel("Z:"))
+        self.pixel_size_z_spin = QDoubleSpinBox()
+        self.pixel_size_z_spin.setRange(0.0001, 10000.0)
+        self.pixel_size_z_spin.setValue(1.0)
+        self.pixel_size_z_spin.setSingleStep(0.1)
+        self.pixel_size_z_spin.setDecimals(3)
+        self.pixel_size_z_spin.setFixedWidth(65)
+        self.pixel_size_z_spin.setToolTip("Z step size in micrometers (µm/frame)")
+        self.pixel_size_z_spin.valueChanged.connect(self.on_calibration_changed)
+        slider_hlayout.addWidget(self.pixel_size_z_spin)
+
+        slider_vlayout.addLayout(slider_hlayout)
+
         self.frame_label = QLabel("Frame: 0 / 0")
         self.frame_label.setAlignment(Qt.AlignCenter)
-        slider_layout.addWidget(self.frame_label)
+        slider_vlayout.addWidget(self.frame_label)
         
         left_layout.addWidget(slider_group)
         
@@ -291,45 +367,17 @@ class HyperViewer(QMainWindow):
         right_layout = QVBoxLayout(right_panel)
         
         # Spectrum plot
-        spectrum_group = QGroupBox("Spectrum Plot")
+        spectrum_group = QGroupBox("Line Plot")
         spectrum_layout = QVBoxLayout(spectrum_group)
-
-        # Plot toolbar
-        plot_toolbar_layout = QHBoxLayout()
-
-        self.lock_axes_btn = QPushButton("🔒 Lock")
-        self.lock_axes_btn.setToolTip("Lock axes (prevents auto-rescaling)")
-        self.lock_axes_btn.setCheckable(True)
-        self.lock_axes_btn.setChecked(True)
-        self.lock_axes_btn.clicked.connect(self.toggle_lock_axes)
-        self.lock_axes_btn.setFixedWidth(80)
-        plot_toolbar_layout.addWidget(self.lock_axes_btn)
-
-        self.autoscale_btn = QPushButton("⤡ Autoscale")
-        self.autoscale_btn.setToolTip("Autoscale axes to fit all data")
-        self.autoscale_btn.clicked.connect(self.autoscale_axes)
-        self.autoscale_btn.setFixedWidth(90)
-        plot_toolbar_layout.addWidget(self.autoscale_btn)
-
-        self.zoom_btn = QPushButton("🔍 Zoom")
-        self.zoom_btn.setToolTip("Zoom mode (mouse wheel to zoom in/out)")
-        self.zoom_btn.setCheckable(True)
-        self.zoom_btn.setChecked(False)
-        self.zoom_btn.clicked.connect(self.toggle_zoom_mode)
-        self.zoom_btn.setFixedWidth(80)
-        plot_toolbar_layout.addWidget(self.zoom_btn)
-
-        plot_toolbar_layout.addStretch()
-
-        spectrum_layout.addLayout(plot_toolbar_layout)
 
         self.spectrum_fig = Figure(figsize=(7, 8))
         self.spectrum_canvas = FigureCanvas(self.spectrum_fig)
-        self.spectrum_canvas.mpl_connect('scroll_event', self.on_spectrum_scroll)
+        self.spectrum_nav_toolbar = NavigationToolbar(self.spectrum_canvas, self)
+        spectrum_layout.addWidget(self.spectrum_nav_toolbar)
         self.spectrum_ax = self.spectrum_fig.add_subplot(111)
-        self.spectrum_ax.set_xlabel('Spectral Band')
+        self.spectrum_ax.set_xlabel('Position (px)')
         self.spectrum_ax.set_ylabel('Intensity')
-        self.spectrum_ax.set_title('Extracted Spectra')
+        self.spectrum_ax.set_title('1D Line Profile')
         self.spectrum_ax.grid(True, alpha=0.3)
 
         spectrum_layout.addWidget(self.spectrum_canvas)
@@ -699,17 +747,24 @@ class HyperViewer(QMainWindow):
         self.hypercube_original = self.hypercube.copy()
         self.background_spectrum = None
         self.background_subtracted = False
-        self.subtract_bg_btn.setEnabled(False)
-        self.bg_status_label.setText("Background: None")
-        self.bg_status_label.setStyleSheet("color: gray; font-style: italic;")
+        if hasattr(self, 'subtract_bg_btn'):
+            self.subtract_bg_btn.setEnabled(False)
+        if hasattr(self, 'bg_status_label'):
+            self.bg_status_label.setText("Background: None")
+            self.bg_status_label.setStyleSheet("color: gray; font-style: italic;")
         
         # Initialize crosshair positions to center of image
         self.crosshair_x = width // 2
         self.crosshair_y = height // 2
 
-        # Setup slider
+        # Setup slider and spinbox
         self.frame_slider.setRange(0, bands - 1)
         self.frame_slider.setValue(0)
+        if hasattr(self, 'frame_spinbox'):
+            self.frame_spinbox.blockSignals(True)
+            self.frame_spinbox.setRange(0, bands - 1)
+            self.frame_spinbox.setValue(0)
+            self.frame_spinbox.blockSignals(False)
         self.frame_label.setText(f"Frame: 0 / {bands - 1}")
 
         # Clear previous content
@@ -717,11 +772,54 @@ class HyperViewer(QMainWindow):
         self.ax_x_spectral.clear()
         self.ax_y_spectral.clear()
 
-        # Display initial frame
+        # Display initial frame immediately upon loading
         self.display_frame(0)
         
         # Reset selection
         self.clear_selection()
+
+    def prev_frame(self):
+        """Step backward 1 frame."""
+        val = self.frame_slider.value()
+        if val > 0:
+            self.frame_slider.setValue(val - 1)
+
+    def next_frame(self):
+        """Step forward 1 frame."""
+        val = self.frame_slider.value()
+        if val < self.frame_slider.maximum():
+            self.frame_slider.setValue(val + 1)
+
+    def on_frame_spinbox_changed(self, val):
+        """Handle direct frame spinbox input."""
+        if self.frame_slider.value() != val:
+            self.frame_slider.setValue(val)
+
+    def on_calibration_changed(self):
+        """Triggered when pixel size calibration values X, Y, or Z are modified."""
+        if hasattr(self, 'update_line_profile_plot'):
+            self.update_line_profile_plot()
+
+    def get_pixel_scale(self):
+        """Get spatial calibration factor (µm per pixel) for current 1D profile direction."""
+        if hasattr(self, 'profile_mode') and self.profile_mode == "Y":
+            return self.pixel_size_y_spin.value() if hasattr(self, 'pixel_size_y_spin') else 1.0
+        return self.pixel_size_x_spin.value() if hasattr(self, 'pixel_size_x_spin') else 1.0
+
+    def get_z_scale(self):
+        """Get Z step calibration factor (µm per frame)."""
+        return self.pixel_size_z_spin.value() if hasattr(self, 'pixel_size_z_spin') else 1.0
+
+    def on_frame_changed(self, val):
+        """Handle slider frame change."""
+        if self.hypercube is not None:
+            self.current_frame = val
+            if hasattr(self, 'frame_spinbox'):
+                self.frame_spinbox.blockSignals(True)
+                self.frame_spinbox.setValue(val)
+                self.frame_spinbox.blockSignals(False)
+            self.frame_label.setText(f"Frame: {val} / {self.hypercube.shape[2] - 1}")
+            self.display_frame(val)
         
     def _align_side_views(self, event=None):
         if not hasattr(self, 'ax_main') or self.ax_main is None or self.ax_x_spectral is None or self.ax_y_spectral is None:
@@ -744,7 +842,8 @@ class HyperViewer(QMainWindow):
         frame_idx = max(0, min(frame_idx, bands - 1))
 
         # Determine color limits (vmin, vmax)
-        if hasattr(self, 'clim') and self.clim is not None:
+        auto_on = hasattr(self, 'auto_clim_cb') and self.auto_clim_cb.isChecked()
+        if not auto_on and hasattr(self, 'clim') and self.clim is not None:
             vmin, vmax = self.clim
         else:
             frame_data = self.hypercube[:, :, frame_idx]
@@ -752,6 +851,8 @@ class HyperViewer(QMainWindow):
             vmax = float(np.nanmax(frame_data))
             if vmin == vmax:
                 vmax = vmin + 1.0
+            if auto_on:
+                self.clim = None
 
         # Update min/max spinboxes without triggering signals
         if hasattr(self, 'vmin_spinbox') and hasattr(self, 'vmax_spinbox'):
@@ -813,6 +914,18 @@ class HyperViewer(QMainWindow):
         if self.hypercube is not None:
             self.display_frame(self.current_frame)
 
+    def on_autoscale_toggled(self, state):
+        """Toggle automatic frame-by-frame color scaling vs manual fixed contrast locking."""
+        if state == Qt.Checked:
+            self.clim = None
+        else:
+            vmin = self.vmin_spinbox.value()
+            vmax = self.vmax_spinbox.value()
+            if vmin < vmax:
+                self.clim = (vmin, vmax)
+        if self.hypercube is not None:
+            self.display_frame(self.current_frame)
+
     def on_clim_changed(self):
         """Handle manual color limit (Vmin, Vmax) spinbox changes."""
         vmin = self.vmin_spinbox.value()
@@ -820,12 +933,20 @@ class HyperViewer(QMainWindow):
         if vmin >= vmax:
             return
         self.clim = (vmin, vmax)
+        if hasattr(self, 'auto_clim_cb'):
+            self.auto_clim_cb.blockSignals(True)
+            self.auto_clim_cb.setChecked(False)
+            self.auto_clim_cb.blockSignals(False)
         if self.hypercube is not None:
             self.display_frame(self.current_frame)
 
     def reset_clim_auto(self):
         """Reset color scale limits to auto frame min/max."""
         self.clim = None
+        if hasattr(self, 'auto_clim_cb'):
+            self.auto_clim_cb.blockSignals(True)
+            self.auto_clim_cb.setChecked(True)
+            self.auto_clim_cb.blockSignals(False)
         if self.hypercube is not None:
             self.display_frame(self.current_frame)
 
@@ -872,22 +993,15 @@ class HyperViewer(QMainWindow):
         self.spectrum_canvas.draw_idle()
 
     def toggle_zoom_mode(self):
-        """Toggle zoom mode for spectrum plot"""
+        """Toggle zoom mode for spectrum plot."""
         self.zoom_mode = self.zoom_btn.isChecked()
+        if hasattr(self, 'spectrum_nav_toolbar') and self.spectrum_nav_toolbar is not None:
+            self.spectrum_nav_toolbar.zoom()
         if self.zoom_mode:
-            self.zoom_btn.setText("✋ Zoom")
-            self.lock_axes_btn.setChecked(False)
-            self.axes_locked = False
-            self.lock_axes_btn.setText("🔓 Lock")
+            self.zoom_btn.setText("🔍 Zoom Active")
             self.spectrum_canvas.setCursor(Qt.CrossCursor)
         else:
             self.zoom_btn.setText("🔍 Zoom")
-            self.lock_axes_btn.setChecked(True)
-            self.axes_locked = True
-            self.lock_axes_btn.setText("🔒 Lock")
-            # Save current zoomed limits as the locked view
-            self.saved_xlim = self.spectrum_ax.get_xlim()
-            self.saved_ylim = self.spectrum_ax.get_ylim()
             self.spectrum_canvas.setCursor(Qt.ArrowCursor)
 
     def on_spectrum_scroll(self, event):
@@ -923,6 +1037,10 @@ class HyperViewer(QMainWindow):
     def on_frame_changed(self, value):
         """Handle spectral frame slider change"""
         self.current_frame = value
+        if hasattr(self, 'frame_spinbox'):
+            self.frame_spinbox.blockSignals(True)
+            self.frame_spinbox.setValue(value)
+            self.frame_spinbox.blockSignals(False)
         self.frame_label.setText(f"Frame: {value} / {self.frame_slider.maximum()}")
         self.display_frame(value)
         
@@ -958,8 +1076,15 @@ class HyperViewer(QMainWindow):
             self.add_circle_selection(x1, y1, radius)
             
         elif self.selection_tool == 'square':
-            size = max(abs(x2 - x1), abs(y2 - y1))
-            self.add_square_selection(x1, y1, size)
+            x_min = min(x1, x2)
+            y_min = min(y1, y2)
+            w_rect = abs(x2 - x1)
+            h_rect = abs(y2 - y1)
+            if hasattr(self, 'add_rectangle_selection'):
+                self.add_rectangle_selection(x_min, y_min, w_rect, h_rect)
+            else:
+                size = max(w_rect, h_rect)
+                self.add_square_selection(x1, y1, size)
 
         # Clear temporary patch
         if self.current_patch:
@@ -996,10 +1121,12 @@ class HyperViewer(QMainWindow):
             self.ax_main.add_patch(self.current_patch)
 
         elif self.selection_tool == 'square':
-            size = max(abs(x2 - x1), abs(y2 - y1))
-            half_size = size / 2
-            self.current_patch = Rectangle((x1 - half_size, y1 - half_size), size, size,
-                                          fill=False, color='blue', linewidth=2, alpha=0.7)
+            x_min = min(x1, x2)
+            y_min = min(y1, y2)
+            w_rect = abs(x2 - x1)
+            h_rect = abs(y2 - y1)
+            self.current_patch = Rectangle((x_min, y_min), w_rect, h_rect,
+                                          fill=False, color='cyan', linewidth=2, linestyle='-', alpha=0.8)
             self.ax_main.add_patch(self.current_patch)
 
         self.image_canvas.draw_idle()
@@ -1038,6 +1165,8 @@ class HyperViewer(QMainWindow):
                 self.selection_overlay.add_circle(*sel['coords'], sel['radius'])
             elif sel['type'] == 'square':
                 self.selection_overlay.add_square(*sel['coords'], sel['size'])
+            elif sel['type'] == 'rectangle':
+                self.selection_overlay.add_rectangle(*sel['rect_coords'])
     
     def add_circle_selection(self, center_x, center_y, radius):
         """Add circle selection"""
@@ -1125,17 +1254,21 @@ class HyperViewer(QMainWindow):
                 self.selection_overlay.add_circle(*sel['coords'], sel['radius'])
             elif sel['type'] == 'square':
                 self.selection_overlay.add_square(*sel['coords'], sel['size'])
+            elif sel['type'] == 'rectangle':
+                self.selection_overlay.add_rectangle(*sel['rect_coords'])
 
     def redraw_all_selections(self):
         """Redraw all saved selections from spectra_list"""
         for spectrum_data in self.spectra_list:
-            if spectrum_data.visible and spectrum_data.coords is not None:
-                if spectrum_data.selection_type == 'point':
+            if spectrum_data.visible:
+                if spectrum_data.selection_type == 'point' and spectrum_data.coords is not None:
                     self.selection_overlay.add_point(*spectrum_data.coords, color=spectrum_data.color, marker='+')
-                elif spectrum_data.selection_type == 'circle':
+                elif spectrum_data.selection_type == 'circle' and spectrum_data.coords is not None:
                     self.selection_overlay.add_circle(*spectrum_data.coords, spectrum_data.radius, color=spectrum_data.color)
-                elif spectrum_data.selection_type == 'square':
+                elif spectrum_data.selection_type == 'square' and spectrum_data.coords is not None:
                     self.selection_overlay.add_square(*spectrum_data.coords, spectrum_data.size, color=spectrum_data.color)
+                elif spectrum_data.selection_type == 'rectangle' and hasattr(spectrum_data, 'rect_coords'):
+                    self.selection_overlay.add_rectangle(*spectrum_data.rect_coords, color=spectrum_data.color)
 
     def plot_current_spectrum(self):
         """Plot all saved spectra plus current selection"""

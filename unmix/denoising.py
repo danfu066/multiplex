@@ -123,7 +123,8 @@ def denoise_wavelet(
             coeffs_thresh = [coeffs[0]] + [
                 pywt.threshold(c, threshold, mode='soft')
                 for c in coeffs[1:]]
-            denoised[i, j, :] = pywt.waverec(coeffs_thresh, wavelet)
+            rec = pywt.waverec(coeffs_thresh, wavelet)
+            denoised[i, j, :] = rec[:L]
 
     denoised = denoised[:, :, :L]
 

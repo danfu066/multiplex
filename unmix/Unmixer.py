@@ -332,19 +332,80 @@ class UnmixerWindow(QMainWindow):
         image_layout.addLayout(color_bar_layout)
         left_layout.addWidget(image_group)
 
-        # Spectral Frame Slider Group
-        slider_group = QGroupBox("Spectral Frame")
-        slider_layout = QVBoxLayout(slider_group)
-        slider_layout.setContentsMargins(6, 4, 6, 4)
+        # Spectral Frame / Focus Z Slider Group
+        slider_group = QGroupBox("Spectral Frame / Focus Z")
+        slider_vlayout = QVBoxLayout(slider_group)
+        slider_vlayout.setContentsMargins(6, 4, 6, 4)
+
+        slider_hlayout = QHBoxLayout()
+
+        self.btn_prev_frame = QPushButton("◀")
+        self.btn_prev_frame.setToolTip("Previous Frame (Left Arrow)")
+        self.btn_prev_frame.setFixedWidth(35)
+        self.btn_prev_frame.clicked.connect(self.prev_frame)
+        slider_hlayout.addWidget(self.btn_prev_frame)
 
         self.frame_slider = QSlider(Qt.Horizontal)
+        self.frame_slider.setSingleStep(1)
+        self.frame_slider.setPageStep(1)
         self.frame_slider.setRange(0, 0)
         self.frame_slider.valueChanged.connect(self.on_frame_changed)
-        slider_layout.addWidget(self.frame_slider)
+        slider_hlayout.addWidget(self.frame_slider)
+
+        self.btn_next_frame = QPushButton("▶")
+        self.btn_next_frame.setToolTip("Next Frame (Right Arrow)")
+        self.btn_next_frame.setFixedWidth(35)
+        self.btn_next_frame.clicked.connect(self.next_frame)
+        slider_hlayout.addWidget(self.btn_next_frame)
+
+        self.frame_spinbox = QSpinBox()
+        self.frame_spinbox.setRange(0, 0)
+        self.frame_spinbox.setFixedWidth(65)
+        self.frame_spinbox.setToolTip("Type exact frame / Z index")
+        self.frame_spinbox.valueChanged.connect(self.on_frame_spinbox_changed)
+        slider_hlayout.addWidget(self.frame_spinbox)
+
+        # Pixel Size Spatial Calibration Boxes (X, Y, Z in µm)
+        slider_hlayout.addSpacing(12)
+        lbl_cal = QLabel("<b>Pixel Size (µm):</b>")
+        lbl_cal.setToolTip("Spatial calibration pixel sizes in micrometers (µm)")
+        slider_hlayout.addWidget(lbl_cal)
+
+        slider_hlayout.addWidget(QLabel("X:"))
+        self.pixel_size_x_spin = QDoubleSpinBox()
+        self.pixel_size_x_spin.setRange(0.0001, 10000.0)
+        self.pixel_size_x_spin.setValue(1.0)
+        self.pixel_size_x_spin.setSingleStep(0.1)
+        self.pixel_size_x_spin.setDecimals(3)
+        self.pixel_size_x_spin.setFixedWidth(65)
+        self.pixel_size_x_spin.setToolTip("X pixel size in micrometers (µm/px)")
+        slider_hlayout.addWidget(self.pixel_size_x_spin)
+
+        slider_hlayout.addWidget(QLabel("Y:"))
+        self.pixel_size_y_spin = QDoubleSpinBox()
+        self.pixel_size_y_spin.setRange(0.0001, 10000.0)
+        self.pixel_size_y_spin.setValue(1.0)
+        self.pixel_size_y_spin.setSingleStep(0.1)
+        self.pixel_size_y_spin.setDecimals(3)
+        self.pixel_size_y_spin.setFixedWidth(65)
+        self.pixel_size_y_spin.setToolTip("Y pixel size in micrometers (µm/px)")
+        slider_hlayout.addWidget(self.pixel_size_y_spin)
+
+        slider_hlayout.addWidget(QLabel("Z:"))
+        self.pixel_size_z_spin = QDoubleSpinBox()
+        self.pixel_size_z_spin.setRange(0.0001, 10000.0)
+        self.pixel_size_z_spin.setValue(1.0)
+        self.pixel_size_z_spin.setSingleStep(0.1)
+        self.pixel_size_z_spin.setDecimals(3)
+        self.pixel_size_z_spin.setFixedWidth(65)
+        self.pixel_size_z_spin.setToolTip("Z step size in micrometers (µm/frame)")
+        slider_hlayout.addWidget(self.pixel_size_z_spin)
+
+        slider_vlayout.addLayout(slider_hlayout)
 
         self.frame_label = QLabel("Frame: 0 / 0")
         self.frame_label.setAlignment(Qt.AlignCenter)
-        slider_layout.addWidget(self.frame_label)
+        slider_vlayout.addWidget(self.frame_label)
 
         left_layout.addWidget(slider_group)
         main_layout.addWidget(left_panel, stretch=3)
@@ -765,14 +826,38 @@ class UnmixerWindow(QMainWindow):
         self.crosshair_y = height // 2
 
         self.frame_slider.setRange(0, bands - 1)
+        if hasattr(self, 'frame_spinbox'):
+            self.frame_spinbox.setRange(0, bands - 1)
+            self.frame_spinbox.setValue(0)
         self.frame_slider.setValue(0)
         self.frame_label.setText(f"Frame: 0 / {bands - 1}")
 
         self._on_data_loaded()
 
+    def prev_frame(self):
+        """Step backward 1 frame."""
+        val = self.frame_slider.value()
+        if val > 0:
+            self.frame_slider.setValue(val - 1)
+
+    def next_frame(self):
+        """Step forward 1 frame."""
+        val = self.frame_slider.value()
+        if val < self.frame_slider.maximum():
+            self.frame_slider.setValue(val + 1)
+
+    def on_frame_spinbox_changed(self, val):
+        """Handle direct frame spinbox input."""
+        if self.frame_slider.value() != val:
+            self.frame_slider.setValue(val)
+
     def on_frame_changed(self, value):
         """Handle spectral frame slider change."""
         self.current_frame = value
+        if hasattr(self, 'frame_spinbox'):
+            self.frame_spinbox.blockSignals(True)
+            self.frame_spinbox.setValue(value)
+            self.frame_spinbox.blockSignals(False)
         if self.hypercube is not None:
             bands = self.hypercube.shape[2]
             self.frame_label.setText(f"Frame: {value} / {bands - 1}")
