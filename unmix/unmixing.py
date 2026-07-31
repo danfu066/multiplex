@@ -62,6 +62,7 @@ def _compute_r2_residuals(
     ss_tot = np.sum(
         (data - np.mean(data, axis=1, keepdims=True)) ** 2, axis=1)
     r2 = np.where(ss_tot > 0, 1.0 - ss_res / ss_tot, 0.0)
+    r2 = np.clip(r2, 0.0, 1.0)
     return (
         r2.reshape(shape_2d),
         np.sqrt(ss_res / L).reshape(shape_2d),
@@ -113,13 +114,15 @@ def run_mcr_als(
             f"n_components ({n_components}) must be < n_bands ({L})")
 
     data = hypercube.reshape(-1, L).astype(np.float64)
-    U, S, Vt = np.linalg.svd(data, full_matrices=False)
-    C = (U[:, :n_components] * S[:n_components]).copy()
-    S_mat = Vt[:n_components, :].copy()
+    # Initialize initial seed spectra using VCA (Vertex Component Analysis) to ensure distinct initial endmembers
+    try:
+        vca_res = run_vca(hypercube, n_endmembers=n_components)
+        S_mat = vca_res['endmembers'].copy()
+    except Exception:
+        U, S, Vt = np.linalg.svd(data, full_matrices=False)
+        S_mat = np.abs(Vt[:n_components, :].copy())
 
-    if non_neg:
-        C = np.maximum(C, 0)
-        S_mat = np.maximum(S_mat, 0)
+    C = np.zeros((n_pixels, n_components), dtype=np.float64)
 
     converged = False
     for iteration in range(max_iter):
@@ -256,72 +259,180 @@ def run_mesma(
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> Dict[str, Any]:
     """
-    Multiple Endmember Spectral Mixture Analysis.
+    Fast Vectorized Multiple Endmember Spectral Mixture Analysis (MESMA).
 
-    For each pixel, selects the best subset of *max_endmembers*
-    endmembers from *basis_spectra* and fits with NNLS.
+    For each pixel, selects the best subset of *max_endmembers* endmembers from
+    *basis_spectra* and fits via fast non-negative projection.
 
     Parameters
     ----------
-    hypercube : (H, W, L)
-    basis_spectra : (K, L) — calibration endmembers
-    max_endmembers : int or None — ``None`` → min(5, K).
+    hypercube : (H, W, L) array
+    basis_spectra : (K, L) array — calibration endmembers
+    max_endmembers : int or None — ``None`` → min(4, K).
     progress_callback : callable(progress_pct, status_text) or None
 
     Returns
     -------
-    dict with keys ``concentrations``, ``basis_spectra``,
-    ``r_squared``, ``residuals``, ``info``.
+    dict with keys ``concentrations``, ``basis_spectra``, ``r_squared``, ``residuals``, ``info``.
     """
     H, W, L = hypercube.shape
     n_pixels = H * W
-    n_endmembers = basis_spectra.shape[0]
+    K = basis_spectra.shape[0]
 
-    if n_endmembers < 2:
+    if K < 2:
         raise ValueError("Need at least 2 endmembers for MESMA.")
 
-    if max_endmembers is None:
-        max_endmembers = min(5, n_endmembers)
+    if max_endmembers is None or max_endmembers > K:
+        max_endmembers = min(4, K)
 
     from itertools import combinations
-    subsets = list(combinations(range(n_endmembers), max_endmembers))
+    subsets = list(combinations(range(K), max_endmembers))
 
-    C = np.zeros((n_pixels, n_endmembers))
-    best_r2 = np.full(n_pixels, -np.inf)
+    X = hypercube.reshape(-1, L).astype(np.float64)  # (N, L)
+    best_C = np.zeros((n_pixels, K), dtype=np.float64)
+    min_residuals = np.full(n_pixels, np.inf, dtype=np.float64)
 
-    for i in range(n_pixels):
-        pixel = hypercube.reshape(-1, L)[i, :]
-        best_resid = np.inf
+    # Evaluate each subset vectorized across all pixels
+    for sub_idx, sub in enumerate(subsets):
+        E_sub = basis_spectra[list(sub)].T  # (L, M)
+        inv_GtG = np.linalg.pinv(E_sub.T @ E_sub)  # (M, M)
+        W_sub = np.maximum(0.0, X @ (E_sub @ inv_GtG))  # (N, M)
 
-        for subset in subsets:
-            A = basis_spectra[list(subset)].T
-            c, resid = nnls(A, pixel)
-            if resid < best_resid:
-                best_resid = resid
-                C[i, subset] = c
+        recon_sub = W_sub @ E_sub.T  # (N, L)
+        res_sub = np.sum((X - recon_sub) ** 2, axis=1)  # (N,)
 
-        recon = basis_spectra.T @ C[i, :]
-        ss_res = np.sum((pixel - recon) ** 2)
-        ss_tot = np.sum((pixel - np.mean(pixel)) ** 2)
-        best_r2[i] = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+        better_mask = res_sub < min_residuals
+        if np.any(better_mask):
+            min_residuals[better_mask] = res_sub[better_mask]
+            best_C[better_mask, :] = 0.0
+            idx_better = np.where(better_mask)[0]
+            best_C[idx_better[:, None], np.array(sub)] = W_sub[better_mask]
 
-        if progress_callback and i % 100 == 0:
-            pct = int(i / n_pixels * 100)
-            progress_callback(pct, f"Pixel {i}/{n_pixels}")
+        if progress_callback:
+            pct = int((sub_idx + 1) / len(subsets) * 100)
+            progress_callback(pct, f"Evaluating MESMA subset {sub_idx+1}/{len(subsets)}")
 
-    reconstructed = C @ basis_spectra
-    data = hypercube.reshape(-1, L).astype(np.float64)
-    r2, resid = _compute_r2_residuals(data, reconstructed, (H, W))
+    reconstructed = best_C @ basis_spectra
+    r2, resid = _compute_r2_residuals(X, reconstructed, (H, W))
 
     return {
-        'concentrations': C.reshape(H, W, n_endmembers),
+        'concentrations': best_C.reshape(H, W, K),
         'basis_spectra': basis_spectra,
         'r_squared': r2,
         'residuals': resid,
         'info': {
-            'n_endmembers': n_endmembers,
+            'n_endmembers': K,
             'max_per_pixel': max_endmembers,
             'n_subsets': len(subsets),
             'n_pixels': n_pixels,
         },
+    }
+
+
+def run_linear_unmix(
+    hypercube: np.ndarray,
+    basis_spectra: np.ndarray,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+) -> Dict[str, Any]:
+    """
+    Per-pixel Non-Negative Least Squares (NNLS) Linear Spectral Unmixing.
+
+    Solves ``min ||x - A c||_2  s.t. c >= 0`` for every pixel using
+    ``scipy.optimize.nnls``, guaranteeing the true optimal non-negative
+    solution (not a clipped OLS approximation).
+
+    Parameters
+    ----------
+    hypercube : (H, W, L) array
+    basis_spectra : (K, L) array — reference endmember spectra
+    progress_callback : callable(progress_pct, status_text) or None
+
+    Returns
+    -------
+    dict with keys ``concentrations``, ``basis_spectra``, ``r_squared``,
+    ``residuals``, ``info``.
+    """
+    H, W, L = hypercube.shape
+    K = basis_spectra.shape[0]
+    n_pixels = H * W
+    X = hypercube.reshape(-1, L).astype(np.float64)
+    A = basis_spectra.T.astype(np.float64)  # (L, K)
+
+    C = np.zeros((n_pixels, K), dtype=np.float64)
+    report_every = max(1, n_pixels // 100)
+    for i in range(n_pixels):
+        C[i], _ = nnls(A, X[i])
+        if progress_callback and i % report_every == 0:
+            progress_callback(int(i / n_pixels * 100),
+                              f"NNLS pixel {i}/{n_pixels}")
+
+    if progress_callback:
+        progress_callback(100, "NNLS complete")
+
+    reconstructed = C @ basis_spectra
+    r2, resid = _compute_r2_residuals(X, reconstructed, (H, W))
+
+    return {
+        'concentrations': C.reshape(H, W, K),
+        'basis_spectra': basis_spectra,
+        'r_squared': r2,
+        'residuals': resid,
+        'info': {'n_endmembers': K, 'algorithm': 'NNLS Linear Unmixing',
+                 'n_pixels': n_pixels},
+    }
+
+
+def run_fcls(
+    hypercube: np.ndarray,
+    basis_spectra: np.ndarray,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+) -> Dict[str, Any]:
+    """
+    Fully Constrained Least Squares (FCLS) Linear Spectral Unmixing.
+
+    Enforces both non-negativity (c >= 0) and sum-to-one (sum(c) = 1)
+    per pixel by augmenting the endmember matrix with a unity row and
+    solving the augmented NNLS problem (Heinz & Chang 2001).
+
+    Parameters
+    ----------
+    hypercube : (H, W, L) array
+    basis_spectra : (K, L) array — reference endmember spectra
+    progress_callback : callable(progress_pct, status_text) or None
+
+    Returns
+    -------
+    dict with keys ``concentrations``, ``basis_spectra``, ``r_squared``,
+    ``residuals``, ``info``.
+    """
+    H, W, L = hypercube.shape
+    K = basis_spectra.shape[0]
+    n_pixels = H * W
+    X = hypercube.reshape(-1, L).astype(np.float64)
+
+    delta = np.max(np.abs(basis_spectra)) * K
+    A_aug = np.vstack([basis_spectra.T, delta * np.ones((1, K))])  # (L+1, K)
+
+    C = np.zeros((n_pixels, K), dtype=np.float64)
+    report_every = max(1, n_pixels // 100)
+    for i in range(n_pixels):
+        b_aug = np.append(X[i], delta)
+        C[i], _ = nnls(A_aug, b_aug)
+        if progress_callback and i % report_every == 0:
+            progress_callback(int(i / n_pixels * 100),
+                              f"FCLS pixel {i}/{n_pixels}")
+
+    if progress_callback:
+        progress_callback(100, "FCLS complete")
+
+    reconstructed = C @ basis_spectra
+    r2, resid = _compute_r2_residuals(X, reconstructed, (H, W))
+
+    return {
+        'concentrations': C.reshape(H, W, K),
+        'basis_spectra': basis_spectra,
+        'r_squared': r2,
+        'residuals': resid,
+        'info': {'n_endmembers': K, 'algorithm': 'FCLS Linear Unmixing',
+                 'n_pixels': n_pixels},
     }

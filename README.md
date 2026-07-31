@@ -18,16 +18,21 @@ A lightweight, high-speed viewer for 3D hyperspectral data cubes $(H \times W \t
 ### 2. `unmix/Unmixer.py`
 An advanced hyperspectral analysis and linear/non-linear unmixing workbench inheriting full viewer capabilities.
 - **Spectral Reference Library**: Load, transform, and manage reference dye/fluorophore spectra (CSV, XLSX, MAT, NPY, TXT).
-- **Unmixing Algorithms**:
-  - **MCR-ALS**: Multivariate Curve Resolution - Alternating Least Squares (with non-negativity constraints).
+- **Unmixing & Decomposition Algorithms**:
+  - **NNLS & FCLS**: Non-Negative Least Squares and Fully Constrained Least Squares ($\sum C_k = 1$).
+  - **MCR-ALS**: Multivariate Curve Resolution - Alternating Least Squares (with non-negativity and sum-to-one constraints).
   - **NMF**: Non-Negative Matrix Factorization (scikit-learn).
   - **MESMA**: Multiple Endmember Spectral Mixture Analysis.
   - **SAM & SID**: Spectral Angle Mapper and Spectral Information Divergence classification.
   - **SVR**: Support Vector Regression unmixing.
-- **Denoising**: MPPCA (Marchenko-Pastur PCA) and Wavelet (VisuShrink) filtering.
+  - **RX Anomaly Detection**: Spatial Mahalanobis distance anomaly finder.
+  - **PCA, MNF & ICA**: Principal Component Analysis, Minimum Noise Fraction (SNR-ordered), and Independent Component Analysis.
+- **Denoising**: 3D Total Variation (3D-TV), MPPCA (Marchenko-Pastur PCA), Savitzky-Golay 1D spectral polynomial filter, and Wavelet (VisuShrink) filtering.
+- **Spectral Normalization**: Real-time switching between Raw Intensity, Total Area, Peak Height, L2 Vector Norm, and Standard Normal Variate (SNV Z-Score).
 - **Endmember Extraction**: PPI (Pixel Purity Index), VCA (Vertex Component Analysis), N-FINDR, and Interactive Endmember Picker.
 - **Peak Fitting**: Gaussian and Lorentzian spectral curve fitting.
 - **Composites**: RGB color synthesis and PC-RGB (first 3 Principal Components) pseudo-color mapping.
+- **Interactive Guide & Standardized Display**: F1 User Guide detailing all algorithms, clean 3-column dual-list UI (`ROI Spectra` / `Basis Spectra`), and synchronized **`↕ Autoscale Y`** canvas toolbars across all suite applications.
 
 ### 3. `OPDviewer/OPDViewer.py`
 Extends `HyperViewer` for liquid-crystal retardance measurement, voltage-sweep conversion, and forward physics simulations.

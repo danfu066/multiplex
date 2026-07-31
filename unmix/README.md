@@ -59,26 +59,34 @@ The window is split into three panels:
 
 | Menu | Algorithm | What it does |
 |---|---|---|
-| **Analysis → Denoise → MPPCA** | Multiplicative PCA | Truncated SVD on unfolded cube. Keeps components explaining ≥95% variance. Discards noise-dominated components. |
-| **Analysis → Denoise → Wavelet** | VisuShrink (universal threshold) | Wavelet decomposition per band, soft-thresholding, reconstruction. Uses Daubechies-4 wavelet. Requires `PyWavelets`. |
+| **Analysis → Denoise → 3D Total Variation** | 3D-TV Primal Gradient | PDE primal gradient descent minimizing spatial-spectral Total Variation while preserving sharp edges. |
+| **Analysis → Denoise → MPPCA** | Multiplicative PCA | Truncated SVD on unfolded cube based on Marchenko-Pastur distribution. Keeps signal components explaining noise variance. |
+| **Analysis → Denoise → Savitzky-Golay** | 1D Polynomial | 1D spectral Savitzky-Golay polynomial smoothing filter preserving peak positions. |
+| **Analysis → Denoise → Wavelet** | VisuShrink (universal threshold) | Wavelet decomposition per band, soft-thresholding, reconstruction using Daubechies-4 wavelet. |
 
-> Both replace the loaded hypercube in-place. Denoise before unmixing for cleaner results.
+> All replace the loaded hypercube in-place. Denoise before unmixing for cleaner results.
 
-### Unmixing (Blind Source Separation)
-
-These algorithms decompose the hypercube into basis spectra × concentration maps **without** needing reference spectra.
+### Unmixing & Classification
 
 | Menu | Algorithm | What it does |
 |---|---|---|
-| **Analysis → Unmixing → MCR-ALS** | Multivariate Curve Resolution — Alternating Least Squares | Alternates between estimating spectra and concentrations with non-negativity and optional closure (sum-to-one) constraints. Can auto-detect components via SVD elbow. |
-| **Analysis → Unmixing → NMF** | Non-Negative Matrix Factorization | Multiplicative-update NMF. Guarantees non-negative basis and concentrations. Specify number of components. Requires `scikit-learn`. |
-| **Analysis → Unmixing → MESMA** | Multiple Endmember Spectral Mixture Analysis | For each pixel, tries all combinations of endmembers up to a max count, picks the best fit. Requires a loaded basis. |
+| **Analysis → Unmixing → NNLS** | Non-Negative Least Squares | Unconstrained non-negative linear unmixing ($C_k \ge 0$). |
+| **Analysis → Unmixing → FCLS** | Fully Constrained Least Squares | Non-negative least squares with sum-to-one constraint ($\sum C_k = 1$). |
+| **Analysis → Unmixing → MCR-ALS** | Multivariate Curve Resolution | Alternating least squares between spectra and concentrations with non-negativity and sum-to-one constraints. |
+| **Analysis → Unmixing → NMF** | Non-Negative Matrix Factorization | Multiplicative-update NMF for blind source separation. |
+| **Analysis → Unmixing → MESMA** | Multiple Endmember Spectral Mixture Analysis | Tries all endmember combinations up to max count, picks best fit. |
+| **Analysis → Classification → SAM** | Spectral Angle Mapper | Illumination-invariant cosine angle classification. |
+| **Analysis → Classification → SID** | Spectral Information Divergence | KL divergence between normalized spectral distributions. |
+| **Analysis → Classification → SVR** | Support Vector Regression | Non-linear regression using SVR trained on synthetic mixtures. |
+| **Analysis → Classification → RX Anomaly** | Reed-Xiaoli Anomaly Detector | Spatial Mahalanobis distance from global spectral mean. |
 
 ### Decomposition
 
 | Menu | Algorithm | What it does |
 |---|---|---|
-| **Analysis → Decomposition → ICA** | Independent Component Analysis | FastICA (NIPALS). Finds statistically independent components. Good for separating mixed signals. Requires `scikit-learn`. |
+| **Analysis → Decomposition → PCA** | Principal Component Analysis | SVD variance-based orthogonal decomposition. |
+| **Analysis → Decomposition → MNF** | Minimum Noise Fraction | Generalised eigenvalue decomposition ordering components by SNR. |
+| **Analysis → Decomposition → ICA** | Independent Component Analysis | FastICA maximizing statistical independence. |
 
 ### Classification
 

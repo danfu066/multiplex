@@ -29,9 +29,9 @@ def run_nfindr(
     """
     N-FINDR endmember extraction.
 
-    Finds the simplex of maximum volume in spectral space.  Iteratively
-    replaces each vertex with the pixel farthest from the hyperplane
-    spanned by the remaining vertices until convergence.
+    Reduces the data to (n_endmembers - 1) dimensions via PCA, then
+    iteratively finds the simplex of maximum volume by replacing each
+    vertex with the pixel that maximises the simplex volume.
 
     Parameters
     ----------
@@ -42,60 +42,61 @@ def run_nfindr(
     Returns
     -------
     dict with keys ``endmembers``, ``indices``, ``positions``, ``info``.
-
-    Notes
-    -----
-    Crispin, J. T. et al. (2000). "MINLR, N-FINDR, and 2D-SFSCARD:
-    Overview of three multichannel AVIRIS endmember-purity index algorithms."
     """
     H, W, L = hypercube.shape
     n_pixels = H * W
+    K = n_endmembers
 
-    if n_endmembers >= L:
+    if K > n_pixels:
         raise ValueError(
-            f"n_endmembers ({n_endmembers}) must be < n_bands ({L})")
-    if n_endmembers > n_pixels:
-        raise ValueError(
-            f"n_endmembers ({n_endmembers}) must be <= n_pixels ({n_pixels})")
+            f"n_endmembers ({K}) must be <= n_pixels ({n_pixels})")
+    if K < 2:
+        raise ValueError("n_endmembers must be >= 2")
 
     data = hypercube.reshape(-1, L).astype(np.float64)
 
-    # Centroid-based initialization (more stable than random)
-    centroid = np.mean(data, axis=0)
-    dists = np.linalg.norm(data - centroid, axis=1)
-    rng = np.random.RandomState(random_state)
-    perm = rng.permutation(n_pixels)
-    vertices = perm[:n_endmembers]
+    # PCA reduction to (K-1) dimensions for volume computation
+    mean_spec = np.mean(data, axis=0)
+    data_centered = data - mean_spec
+    _, _, Vt = np.linalg.svd(data_centered, full_matrices=False)
+    proj_matrix = Vt[:K - 1, :]  # (K-1, L)
+    data_reduced = data_centered @ proj_matrix.T  # (N, K-1)
 
-    # N-FINDR iterations
+    rng = np.random.RandomState(random_state)
+    vertices = rng.choice(n_pixels, size=K, replace=False)
+
+    def _simplex_volume(verts):
+        """Signed volume of simplex formed by vertex indices in reduced space."""
+        coords = data_reduced[verts]  # (K, K-1)
+        augmented = np.ones((K, K), dtype=np.float64)
+        augmented[:, 1:] = coords
+        return np.abs(np.linalg.det(augmented))
+
     max_iter = 50
     for iteration in range(max_iter):
-        old_vertices = vertices.copy()
+        changed = False
+        for i in range(K):
+            current_vol = _simplex_volume(vertices)
+            best_vol = current_vol
+            best_pixel = vertices[i]
 
-        for i in range(n_endmembers):
-            # Hyperplane spanned by all other vertices
-            others = np.delete(vertices, i)
-            A = data[others]  # (K-1, L)
+            test_verts = vertices.copy()
+            for p in range(n_pixels):
+                if p in vertices:
+                    continue
+                test_verts[i] = p
+                vol = _simplex_volume(test_verts)
+                if vol > best_vol:
+                    best_vol = vol
+                    best_pixel = p
 
-            # Project all pixels onto the normal of this hyperplane
-            # Normal = null space of A → last column of Vt from SVD
-            _, _, Vt = np.linalg.svd(A, full_matrices=False)
-            normal = Vt[-1, :]  # direction orthogonal to hyperplane
+            if best_pixel != vertices[i]:
+                vertices[i] = best_pixel
+                changed = True
 
-            # Signed distance of each pixel from hyperplane through origin
-            # Offset by one vertex to anchor the plane
-            diff = data - data[others[0]]
-            projections = np.abs(diff @ normal)
-
-            # Find pixel farthest from hyperplane
-            best = np.argmax(projections)
-            vertices[i] = best
-
-        # Convergence: vertex set unchanged
-        if np.array_equal(vertices, old_vertices):
+        if not changed:
             break
 
-    # Extract endmember spectra and positions
     endmembers = data[vertices]
     rows = vertices // W
     cols = vertices % W
@@ -106,11 +107,12 @@ def run_nfindr(
         'positions': np.column_stack([rows, cols]),
         'info': {
             'algorithm': 'N-FINDR',
-            'n_endmembers': n_endmembers,
+            'n_endmembers': K,
             'n_bands': L,
             'n_pixels': n_pixels,
             'iterations': iteration + 1,
-            'converged': np.array_equal(vertices, old_vertices),
+            'converged': not changed,
+            'final_volume': float(_simplex_volume(vertices)),
         },
     }
 
@@ -127,9 +129,12 @@ def run_vca(
     """
     Vertex Component Analysis endmember extraction.
 
-    Fast NIPALS-style algorithm that exploits the minimum volume
-    property of the spectral simplex.  Projects data onto orthogonal
-    directions to successively isolate vertices.
+    Projects data onto a (p)-dimensional PCA subspace, then iteratively
+    identifies simplex vertices by projecting onto directions orthogonal
+    to the subspace spanned by already-selected endmembers.
+
+    Based on: Nascimento & Bioucas-Dias (2005), "Vertex Component
+    Analysis: A Fast Algorithm to Unmix Hyperspectral Data", IEEE TGRS.
 
     Parameters
     ----------
@@ -140,66 +145,62 @@ def run_vca(
     Returns
     -------
     dict with keys ``endmembers``, ``indices``, ``positions``, ``info``.
-
-    Notes
-    -----
-    Nascimento, J. M. & Plaza, A. (2002). "Dimensionality reduction and
-    classification of hyperspectral data with histograms of angles."
-    IEEE TGRS, 40(1), 253-266.
     """
     H, W, L = hypercube.shape
     n_pixels = H * W
+    K = n_endmembers
 
-    if n_endmembers >= L:
-        raise ValueError(
-            f"n_endmembers ({n_endmembers}) must be < n_bands ({L})")
+    if K < 2:
+        raise ValueError("n_endmembers must be >= 2")
 
     data = hypercube.reshape(-1, L).astype(np.float64)
 
-    # Mean-centre the data
-    mean = np.mean(data, axis=0)
-    data_centered = data - mean
+    # PCA projection to K dimensions
+    mean_spec = np.mean(data, axis=0)
+    data_centered = data - mean_spec
+    U, S, Vt = np.linalg.svd(data_centered, full_matrices=False)
+    proj = Vt[:K, :]  # (K, L)
+    Y = data_centered @ proj.T  # (N, K) — data in reduced space
 
     rng = np.random.RandomState(random_state)
     vertices = []
+    A = np.zeros((K, 0), dtype=np.float64)  # selected endmember columns
 
-    # Random initial unit vector
-    p = rng.randn(L)
-    p /= np.linalg.norm(p)
+    for k in range(K):
+        if A.shape[1] == 0:
+            # First endmember: random direction
+            w = rng.randn(K)
+        else:
+            # Orthogonal projector onto complement of span(A)
+            # f = (I - A @ pinv(A)) @ w
+            w = rng.randn(K)
+            proj_A = A @ np.linalg.pinv(A)  # projection onto span(A)
+            w = w - proj_A @ w
 
-    for k in range(n_endmembers):
-        # Project all pixels onto the orthogonal direction p
-        projections = np.abs(data_centered @ p)
+        w_norm = np.linalg.norm(w)
+        if w_norm < 1e-12:
+            w = rng.randn(K)
+            w_norm = np.linalg.norm(w)
+        w = w / w_norm
 
-        # Vertex = pixel with maximum projection
+        projections = np.abs(Y @ w)
         idx = np.argmax(projections)
         vertices.append(idx)
 
-        if k < n_endmembers - 1:
-            # Compute new orthogonal direction via NIPALS
-            endmember = data_centered[idx]
-            # Project all data onto direction of found endmember
-            scores = data_centered @ endmember
-            scores /= np.linalg.norm(endmember) ** 2
-            # Deflate: remove contribution of found endmember
-            data_centered -= np.outer(scores, endmember)
+        A = np.column_stack([A, Y[idx]])
 
-            # New random direction in deflated space
-            p = rng.randn(L)
-            p /= np.linalg.norm(p)
-
-    # Extract endmember spectra from original (non-centred) data
+    vertices = np.array(vertices)
     endmembers = data[vertices]
-    rows = np.array(vertices) // W
-    cols = np.array(vertices) % W
+    rows = vertices // W
+    cols = vertices % W
 
     return {
         'endmembers': endmembers,
-        'indices': np.array(vertices),
+        'indices': vertices,
         'positions': np.column_stack([rows, cols]),
         'info': {
             'algorithm': 'VCA',
-            'n_endmembers': n_endmembers,
+            'n_endmembers': K,
             'n_bands': L,
             'n_pixels': n_pixels,
         },

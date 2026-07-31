@@ -146,12 +146,28 @@ def fit_spectrum(
     for idx in peak_indices:
         amp = spec_clean[idx]
         cen = wavelengths[idx]
-        # Estimate width from half-maximum
-        half_max = amp / 2
-        left = np.searchsorted(wavelengths[:idx], cen)
-        right = len(wavelengths) - 1 - np.searchsorted(
-            wavelengths[idx:][::-1], cen)
-        wid = max(1.0, (right - left) / 2)
+        half_max = amp / 2.0
+        # Find left half-maximum crossing
+        left_idx = idx
+        for j in range(idx - 1, -1, -1):
+            if spec_clean[j] <= half_max:
+                left_idx = j
+                break
+        # Find right half-maximum crossing
+        right_idx = idx
+        for j in range(idx + 1, L):
+            if spec_clean[j] <= half_max:
+                right_idx = j
+                break
+        fwhm = abs(wavelengths[right_idx] - wavelengths[left_idx])
+        if fwhm > 0:
+            if model == 'gaussian':
+                wid = fwhm / 2.355  # FWHM = 2*sqrt(2*ln2)*sigma
+            else:
+                wid = fwhm / 2.0    # Lorentzian FWHM = 2*gamma
+        else:
+            wid = (wavelengths[-1] - wavelengths[0]) / (10.0 * n_peaks)
+        wid = max(0.1, wid)
         p0.extend([amp, cen, wid])
 
     # Select model function

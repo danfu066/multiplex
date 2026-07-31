@@ -808,6 +808,22 @@ class KnifeEdgeViewer(HyperViewer):
 
         # Config Row: Line Width, Fit Window, Fit Model & Noise Smoothing
         row_cfg = QHBoxLayout()
+        row_cfg.addWidget(QLabel("X:"))
+        self.roi_x_spin = QSpinBox()
+        self.roi_x_spin.setRange(0, 99999)
+        self.roi_x_spin.setValue(0)
+        self.roi_x_spin.setToolTip("Fine-tune crosshair X position (or use Arrow Keys)")
+        self.roi_x_spin.valueChanged.connect(self._on_roi_spinbox_changed)
+        row_cfg.addWidget(self.roi_x_spin)
+
+        row_cfg.addWidget(QLabel("Y:"))
+        self.roi_y_spin = QSpinBox()
+        self.roi_y_spin.setRange(0, 99999)
+        self.roi_y_spin.setValue(0)
+        self.roi_y_spin.setToolTip("Fine-tune crosshair Y position (or use Arrow Keys)")
+        self.roi_y_spin.valueChanged.connect(self._on_roi_spinbox_changed)
+        row_cfg.addWidget(self.roi_y_spin)
+
         row_cfg.addWidget(QLabel("Line Width (px):"))
         self.line_width_spin = QSpinBox()
         self.line_width_spin.setRange(1, 200)
@@ -1091,6 +1107,50 @@ class KnifeEdgeViewer(HyperViewer):
 
     def display_frame(self, frame_idx):
         super().display_frame(frame_idx)
+        self.update_line_profile_plot()
+
+    def keyPressEvent(self, event):
+        """Handle Arrow Keys to nudge crosshair position pixel-by-pixel (Shift+Arrow for 5px jumps)."""
+        if self.hypercube is None:
+            super().keyPressEvent(event)
+            return
+
+        key = event.key()
+        if key not in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+            super().keyPressEvent(event)
+            return
+
+        step = 5 if (event.modifiers() & Qt.ShiftModifier) else 1
+        dx = -step if key == Qt.Key_Left else (step if key == Qt.Key_Right else 0)
+        dy = -step if key == Qt.Key_Up else (step if key == Qt.Key_Down else 0)
+
+        H, W = self.hypercube.shape[:2]
+        new_x = max(0, min(W - 1, (self.crosshair_x or W // 2) + dx))
+        new_y = max(0, min(H - 1, (self.crosshair_y or H // 2) + dy))
+
+        self.crosshair_x = new_x
+        self.crosshair_y = new_y
+
+        if hasattr(self, 'roi_x_spin') and hasattr(self, 'roi_y_spin'):
+            self.roi_x_spin.blockSignals(True)
+            self.roi_y_spin.blockSignals(True)
+            self.roi_x_spin.setValue(new_x)
+            self.roi_y_spin.setValue(new_y)
+            self.roi_x_spin.blockSignals(False)
+            self.roi_y_spin.blockSignals(False)
+
+        self.display_frame(self.current_frame)
+        self.update_line_profile_plot()
+
+    def _on_roi_spinbox_changed(self):
+        """Callback when X or Y spinboxes change manually."""
+        if self.hypercube is None:
+            return
+        x = self.roi_x_spin.value()
+        y = self.roi_y_spin.value()
+        self.crosshair_x = x
+        self.crosshair_y = y
+        self.display_frame(self.current_frame)
         self.update_line_profile_plot()
 
     def on_canvas_press(self, event):

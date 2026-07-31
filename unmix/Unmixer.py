@@ -31,9 +31,9 @@ from PyQt5.QtWidgets import (
     QSplitter, QFileDialog, QMessageBox, QLabel, QPushButton, QSlider,
     QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QRadioButton,
     QButtonGroup, QGroupBox, QProgressBar, QInputDialog, QDialog,
-    QFormLayout, QScrollArea, QAction
+    QFormLayout, QScrollArea, QAction, QTabWidget, QLineEdit, QTextEdit
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QEvent
 from PyQt5.QtGui import QKeySequence
 
 import matplotlib
@@ -58,17 +58,36 @@ except ImportError:
     HAS_TIFFFILE = False
 
 from unmix import (
-    run_mcr_als, run_nmf, run_mesma,
-    run_pca, run_sam, run_sid, run_svr,
-    denoise_mppca, denoise_wavelet,
+    run_mcr_als, run_nmf, run_mesma, run_linear_unmix, run_fcls,
+    run_pca, run_mnf, run_sam, run_sid, run_rx,
+    denoise_mppca, denoise_wavelet, denoise_savgol, denoise_tv3d, denoise_bm4d,
     run_nfindr, run_vca, fit_spectrum,
 )
+
+
+def clean_navigation_toolbar(toolbar, autoscale_callback=None):
+    """
+    Remove Back (<-), Forward (->), Pan (4-way double arrow), and Subplots configuration buttons
+    from Matplotlib NavigationToolbar across both Image and Plot canvases.
+    Optionally add an '↕ Autoscale Y' button for plot canvases.
+    """
+    for action in list(toolbar.actions()):
+        txt = (action.text() or "").lower()
+        ttip = (action.toolTip() or "").lower()
+        if any(k in txt or k in ttip for k in ['back', 'forward', 'pan', 'subplots', 'configure']):
+            toolbar.removeAction(action)
+
+    if autoscale_callback is not None:
+        autoscale_action = QAction("↕ Autoscale Y", toolbar)
+        autoscale_action.setToolTip("Autoscale Y-axis limits to fit all visible curves")
+        autoscale_action.triggered.connect(autoscale_callback)
+        toolbar.addAction(autoscale_action)
 
 
 class SpectrumData:
     """Store spectrum data with metadata."""
     def __init__(self, spectrum, std=None, label="", color="blue", selection_type="point",
-                 coords=None, mask=None):
+                 coords=None, mask=None, linestyle="-"):
         self.spectrum = np.array(spectrum, dtype=float)
         self.std = np.array(std, dtype=float) if std is not None else None
         self.label = label
@@ -77,6 +96,7 @@ class SpectrumData:
         self.coords = coords
         self.mask = mask
         self.visible = True
+        self.linestyle = linestyle
 
 
 class SpectraDisplayWindow(QMainWindow):
@@ -163,7 +183,8 @@ class UnmixerWindow(QMainWindow):
         self.selection_active = False
         self.selection_start = None
         self.current_selection = None
-        self.spectra_list = []         # list of SpectrumData objects
+        self.spectra_list = []         # list of ROI SpectrumData objects
+        self.basis_spectra_list = []   # list of Basis / Reference SpectrumData objects
         self.background_spectrum = None
         self.bg_radio_group = QButtonGroup(self)
         self._temp_rect = None
@@ -189,6 +210,7 @@ class UnmixerWindow(QMainWindow):
 
         self._build_ui()
         self._build_menu()
+        self.installEventFilter(self)
         self.statusBar().showMessage("Ready")
 
     # -----------------------------------------------------------------------
@@ -217,6 +239,8 @@ class UnmixerWindow(QMainWindow):
 
         self.tool_point = QPushButton("• Point")
         self.tool_point.setCheckable(True)
+        self.tool_point.setChecked(True)
+        self.selection_tool = 'point'
         self.tool_point.clicked.connect(lambda: self._set_selection_tool('point'))
         self.tool_button_group.addButton(self.tool_point)
         tool_layout.addWidget(self.tool_point)
@@ -238,11 +262,28 @@ class UnmixerWindow(QMainWindow):
         tool_layout.addWidget(self.clear_btn)
 
         tool_layout.addSpacing(10)
+        tool_layout.addWidget(QLabel("X:"))
+        self.roi_x_spin = QSpinBox()
+        self.roi_x_spin.setRange(0, 99999)
+        self.roi_x_spin.setValue(0)
+        self.roi_x_spin.setToolTip("Fine-tune ROI X position (or use Arrow Keys)")
+        self.roi_x_spin.valueChanged.connect(self._on_roi_spinbox_changed)
+        tool_layout.addWidget(self.roi_x_spin)
+
+        tool_layout.addWidget(QLabel("Y:"))
+        self.roi_y_spin = QSpinBox()
+        self.roi_y_spin.setRange(0, 99999)
+        self.roi_y_spin.setValue(0)
+        self.roi_y_spin.setToolTip("Fine-tune ROI Y position (or use Arrow Keys)")
+        self.roi_y_spin.valueChanged.connect(self._on_roi_spinbox_changed)
+        tool_layout.addWidget(self.roi_y_spin)
+
         tool_layout.addWidget(QLabel("Size:"))
         self.size_spin = QSpinBox()
-        self.size_spin.setRange(1, 100)
+        self.size_spin.setRange(1, 200)
         self.size_spin.setValue(10)
         self.size_spin.setSuffix(" px")
+        self.size_spin.valueChanged.connect(self._on_roi_spinbox_changed)
         tool_layout.addWidget(self.size_spin)
 
         tool_layout.addSpacing(15)
@@ -260,6 +301,13 @@ class UnmixerWindow(QMainWindow):
         ])
         self.resample_combo.activated[str].connect(self.apply_spatial_resample)
         tool_layout.addWidget(self.resample_combo)
+
+        tool_layout.addSpacing(10)
+        self.reset_data_btn = QPushButton("Reset Data")
+        self.reset_data_btn.setStyleSheet("font-weight: bold; color: #D32F2F;")
+        self.reset_data_btn.setToolTip("Restore original raw intensity hypercube (reverses spatial resampling, background subtraction, and denoising)")
+        self.reset_data_btn.clicked.connect(self.restart_analysis)
+        tool_layout.addWidget(self.reset_data_btn)
 
         tool_layout.addStretch()
         left_layout.addWidget(tool_group)
@@ -291,6 +339,7 @@ class UnmixerWindow(QMainWindow):
 
         # Built-in Matplotlib Zoom & Pan navigation toolbar for spatial view
         self.nav_toolbar = NavigationToolbar(self.image_canvas, self)
+        clean_navigation_toolbar(self.nav_toolbar)
         image_layout.addWidget(self.nav_toolbar)
 
         # Bottom Color & Scale Controls bar directly under spatial image canvas
@@ -411,131 +460,178 @@ class UnmixerWindow(QMainWindow):
         left_layout.addWidget(slider_group)
         main_layout.addWidget(left_panel, stretch=3)
 
-        # ==================== Right Panel: Spectrum Plot & Management ====================
+        # ==================== Right Panel: Plot Windows & ROI Manager ====================
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(2, 2, 2, 2)
 
-        # Spectrum Plot Box (generous height)
-        spectrum_group = QGroupBox("Spectrum Plot")
-        spectrum_layout = QVBoxLayout(spectrum_group)
-        spectrum_layout.setContentsMargins(4, 4, 4, 4)
+        # Tabbed Plot Container (Tab 1: Extracted Spectra | Tab 2: Analysis Results & Fitting)
+        self.plot_tabs = QTabWidget()
+        self.plot_tabs.setStyleSheet("QTabBar::tab { font-weight: bold; padding: 6px 12px; }")
 
-        plot_toolbar_layout = QHBoxLayout()
+        # --- Tab 1: Extracted Spectra ---
+        tab_spec = QWidget()
+        layout_spec = QVBoxLayout(tab_spec)
+        layout_spec.setContentsMargins(2, 2, 2, 2)
 
-        self.lock_axes_btn = QPushButton("🔒 Lock")
-        self.lock_axes_btn.setToolTip("Lock axes (prevents auto-rescaling)")
-        self.lock_axes_btn.setCheckable(True)
-        self.lock_axes_btn.setChecked(True)
-        self.lock_axes_btn.clicked.connect(self.toggle_lock_axes)
-        self.lock_axes_btn.setFixedWidth(85)
-        plot_toolbar_layout.addWidget(self.lock_axes_btn)
-
-        self.autoscale_btn = QPushButton("⤡ Autoscale")
-        self.autoscale_btn.setToolTip("Autoscale axes to fit all data")
-        self.autoscale_btn.clicked.connect(self.autoscale_axes)
-        self.autoscale_btn.setFixedWidth(95)
-        plot_toolbar_layout.addWidget(self.autoscale_btn)
-
-        self.zoom_btn = QPushButton("🔍 Zoom")
-        self.zoom_btn.setToolTip("Zoom mode (mouse wheel to zoom in/out)")
-        self.zoom_btn.setCheckable(True)
-        self.zoom_btn.setChecked(False)
-        self.zoom_btn.clicked.connect(self.toggle_zoom_mode)
-        self.zoom_btn.setFixedWidth(85)
-        plot_toolbar_layout.addWidget(self.zoom_btn)
-
-        plot_toolbar_layout.addStretch()
-        spectrum_layout.addLayout(plot_toolbar_layout)
-
-        # Large Spectrum Canvas
-        self.spectrum_fig = Figure(figsize=(7, 7), dpi=100)
+        self.spectrum_fig = Figure(figsize=(7, 6), dpi=100)
         self.spectrum_canvas = FigureCanvas(self.spectrum_fig)
         self.spectrum_canvas.mpl_connect('scroll_event', self.on_spectrum_scroll)
+        self.spectrum_nav_toolbar = NavigationToolbar(self.spectrum_canvas, self)
+        clean_navigation_toolbar(self.spectrum_nav_toolbar, self.autoscale_y_axis)
+        layout_spec.addWidget(self.spectrum_nav_toolbar)
 
         self.ax_spectrum = self.spectrum_fig.add_subplot(111)
-        self.ax_spectrum.set_xlabel('Spectral Band')
+        self.ax_spectrum.set_xlabel('Spectral Band / Wavelength')
         self.ax_spectrum.set_ylabel('Intensity')
-        self.ax_spectrum.set_title('Extracted Spectra')
+        self.ax_spectrum.set_title('Extracted Spectra (ROIs & Points)')
         self.ax_spectrum.grid(True, alpha=0.3)
+        layout_spec.addWidget(self.spectrum_canvas)
+        self.plot_tabs.addTab(tab_spec, "📈 Extracted Spectra")
 
-        spectrum_layout.addWidget(self.spectrum_canvas)
-        right_layout.addWidget(spectrum_group, stretch=3)
+        # --- Tab 2: Analysis Results & Fitting ---
+        tab_analysis = QWidget()
+        layout_analysis = QVBoxLayout(tab_analysis)
+        layout_analysis.setContentsMargins(2, 2, 2, 2)
 
-        # Spectrum Management & Reference Spectra Group
-        control_group = QGroupBox("Spectrum Management")
+        self.analysis_fig = Figure(figsize=(7, 6), dpi=100)
+        self.analysis_canvas = FigureCanvas(self.analysis_fig)
+        self.analysis_nav_toolbar = NavigationToolbar(self.analysis_canvas, self)
+        clean_navigation_toolbar(self.analysis_nav_toolbar, self.autoscale_y_axis)
+        layout_analysis.addWidget(self.analysis_nav_toolbar)
+
+        self.ax_analysis = self.analysis_fig.add_subplot(111)
+        self.ax_analysis.set_xlabel('Spectral Band / Wavelength')
+        self.ax_analysis.set_ylabel('Component Amplitude / Fitting Value')
+        self.ax_analysis.set_title('Analysis Results & Fitting Error')
+        self.ax_analysis.grid(True, alpha=0.3)
+        layout_analysis.addWidget(self.analysis_canvas)
+        self.plot_tabs.addTab(tab_analysis, "📊 Analysis Results & Fitting")
+        self.plot_tabs.currentChanged.connect(self._on_plot_tab_changed)
+
+        right_layout.addWidget(self.plot_tabs, stretch=4)
+
+        # --- Spectrum Management & ROI Manager Panel ---
+        control_group = QGroupBox("Spectrum & ROI Manager")
         control_layout = QVBoxLayout(control_group)
-        control_layout.setContentsMargins(4, 4, 4, 4)
+        control_layout.setContentsMargins(6, 6, 6, 6)
 
-        btn_row1 = QHBoxLayout()
-        self.add_btn = QPushButton("Add Current Selection")
+        # Header Row: Left Half = ROI Manager Label | Right Half = Export All & Load Ref Buttons
+        header_row = QHBoxLayout()
+        roi_lbl = QLabel("<b>ROI Manager & Saved Spectra</b>")
+        roi_lbl.setStyleSheet("font-size: 12px; color: #1565C0;")
+        header_row.addWidget(roi_lbl)
+
+        self.bg_status_label = QLabel("Background: None")
+        self.bg_status_label.setStyleSheet("font-size: 11px; color: #757575;")
+        header_row.addWidget(self.bg_status_label)
+
+        header_row.addStretch()
+
+        self.export_btn = QPushButton("Export All Spectra")
+        self.export_btn.setToolTip("Export all saved spectra to CSV file")
+        self.export_btn.clicked.connect(self._export_all_spectra)
+        header_row.addWidget(self.export_btn)
+
+        self.load_ref_btn = QPushButton("Load Reference Spectra")
+        self.load_ref_btn.setToolTip("Load reference dye/fluorophore spectra from CSV, XLSX, MAT file")
+        self.load_ref_btn.clicked.connect(self.load_reference_spectra)
+        header_row.addWidget(self.load_ref_btn)
+
+        control_layout.addLayout(header_row)
+
+        # 3-Column Dual List Layout: Left = ROI Spectra | Center = Actions & ➡️ Transfer | Right = Basis Spectra
+        side_by_side_layout = QHBoxLayout()
+
+        # Column 1 (Left): ROI Spectra List Box (Extracted from Canvas Image)
+        roi_container = QVBoxLayout()
+        roi_container.setSpacing(1)
+        roi_header = QHBoxLayout()
+        roi_header.setContentsMargins(4, 0, 4, 0)
+        roi_header.addWidget(QLabel("<b>✓</b>"), 0)
+        roi_header.addWidget(QLabel("<b>ROI Spectra</b>"), 1)
+        roi_container.addLayout(roi_header)
+
+        self.spectrum_scroll = QScrollArea()
+        self.spectrum_scroll.setWidgetResizable(True)
+        self.spectrum_scroll.setMinimumHeight(180)
+        self.checkbox_widget = QWidget()
+        self.checkbox_layout = QVBoxLayout(self.checkbox_widget)
+        self.checkbox_layout.setAlignment(Qt.AlignTop)
+        self.checkbox_layout.setContentsMargins(2, 2, 2, 2)
+        self.spectrum_scroll.setWidget(self.checkbox_widget)
+        roi_container.addWidget(self.spectrum_scroll)
+
+        side_by_side_layout.addLayout(roi_container, stretch=2)
+
+        # Column 2 (Center): Action & Transfer Buttons Stack
+        btn_vbox = QVBoxLayout()
+        btn_vbox.setContentsMargins(4, 0, 4, 0)
+
+        self.add_btn = QPushButton("Add Selection")
+        self.add_btn.setToolTip("Add selected canvas point/region spectrum to ROI list")
         self.add_btn.clicked.connect(self.add_current_spectrum)
-        btn_row1.addWidget(self.add_btn)
+        btn_vbox.addWidget(self.add_btn)
 
-        self.delete_btn = QPushButton("Delete Selected")
-        self.delete_btn.clicked.connect(self.delete_selected_spectrum)
-        btn_row1.addWidget(self.delete_btn)
-        control_layout.addLayout(btn_row1)
+        self.copy_to_basis_btn = QPushButton("➡️ Add to Basis")
+        self.copy_to_basis_btn.setStyleSheet("font-weight: bold; color: #1565C0; font-size: 12px;")
+        self.copy_to_basis_btn.setToolTip("Copy checked ROI spectra to Basis fitting library")
+        self.copy_to_basis_btn.clicked.connect(self.copy_roi_to_basis)
+        btn_vbox.addWidget(self.copy_to_basis_btn)
 
-        btn_row2 = QHBoxLayout()
+        self.fit_roi_btn = QPushButton("Fit ROI to Basis")
+        self.fit_roi_btn.setStyleSheet("font-weight: bold; color: #2E7D32; font-size: 12px;")
+        self.fit_roi_btn.setToolTip("Fit selected ROI spectrum against Basis spectra using NNLS")
+        self.fit_roi_btn.clicked.connect(self.fit_selected_roi_to_basis)
+        btn_vbox.addWidget(self.fit_roi_btn)
+
         self.set_bg_btn = QPushButton("Set as Background")
         self.set_bg_btn.clicked.connect(self.set_background_spectrum)
-        btn_row2.addWidget(self.set_bg_btn)
+        btn_vbox.addWidget(self.set_bg_btn)
 
         self.subtract_bg_btn = QPushButton("Subtract Background")
         self.subtract_bg_btn.setCheckable(True)
         self.subtract_bg_btn.clicked.connect(self.toggle_background_subtraction)
-        btn_row2.addWidget(self.subtract_bg_btn)
-        control_layout.addLayout(btn_row2)
+        btn_vbox.addWidget(self.subtract_bg_btn)
 
-        self.bg_status_label = QLabel("Background: None")
-        self.bg_status_label.setStyleSheet("color: gray; font-style: italic;")
-        control_layout.addWidget(self.bg_status_label)
+        norm_lbl = QLabel("Normalization:")
+        norm_lbl.setStyleSheet("font-size: 11px; font-weight: bold; margin-top: 4px;")
+        btn_vbox.addWidget(norm_lbl)
 
-        self.export_btn = QPushButton("Export All Spectra")
-        self.export_btn.clicked.connect(self._export_all_spectra)
-        control_layout.addWidget(self.export_btn)
+        self.norm_mode_combo = QComboBox()
+        self.norm_mode_combo.addItem("Original (Raw)", 'raw')
+        self.norm_mode_combo.addItem("Total Intensity (spec / sum)", 'total')
+        self.norm_mode_combo.addItem("Peak Intensity (spec / max)", 'peak')
+        self.norm_mode_combo.addItem("L2 Vector Norm (spec / ||spec||)", 'l2')
+        self.norm_mode_combo.addItem("SNV Z-Score ((spec - μ) / σ)", 'snv')
+        self.norm_mode_combo.setToolTip("Select spectral normalization & chemometric standardisation mode")
+        self.norm_mode_combo.currentIndexChanged.connect(self.on_norm_mode_changed)
+        btn_vbox.addWidget(self.norm_mode_combo)
 
-        control_layout.addSpacing(4)
+        side_by_side_layout.addLayout(btn_vbox, stretch=1)
 
-        # Reference Spectra Buttons
-        ref_group = QHBoxLayout()
-        self.load_ref_btn = QPushButton("Load Reference Spectra")
-        self.load_ref_btn.clicked.connect(self.load_reference_spectra)
-        ref_group.addWidget(self.load_ref_btn)
+        # Column 3 (Right): Basis Spectra List Box (Used for Fitting & Unmixing)
+        basis_container = QVBoxLayout()
+        basis_container.setSpacing(1)
+        basis_header = QHBoxLayout()
+        basis_header.setContentsMargins(4, 0, 4, 0)
+        basis_header.addWidget(QLabel("<b>✓</b>"), 0)
+        basis_header.addWidget(QLabel("<b>Basis Spectra</b>"), 1)
+        basis_container.addLayout(basis_header)
 
-        self.transform_btn = QPushButton("Transform Spectra")
-        self.transform_btn.setEnabled(False)
-        self.transform_btn.clicked.connect(self.transform_spectra)
-        ref_group.addWidget(self.transform_btn)
+        self.basis_scroll = QScrollArea()
+        self.basis_scroll.setWidgetResizable(True)
+        self.basis_scroll.setMinimumHeight(180)
+        self.basis_widget = QWidget()
+        self.basis_layout = QVBoxLayout(self.basis_widget)
+        self.basis_layout.setAlignment(Qt.AlignTop)
+        self.basis_layout.setContentsMargins(2, 2, 2, 2)
+        self.basis_scroll.setWidget(self.basis_widget)
+        basis_container.addWidget(self.basis_scroll)
 
-        self.save_transform_btn = QPushButton("Save Transformed")
-        self.save_transform_btn.setEnabled(False)
-        self.save_transform_btn.clicked.connect(self.save_transformed_spectra)
-        ref_group.addWidget(self.save_transform_btn)
-        control_layout.addLayout(ref_group)
+        side_by_side_layout.addLayout(basis_container, stretch=2)
 
-        self.ref_status_label = QLabel("Reference Spectra: None loaded")
-        self.ref_status_label.setStyleSheet("color: gray; font-style: italic;")
-        self.ref_status_label.setWordWrap(True)
-        control_layout.addWidget(self.ref_status_label)
-
-        # Scrollable table list for spectra
-        self.spectrum_scroll = QScrollArea()
-        self.spectrum_scroll.setWidgetResizable(True)
-        self.spectrum_scroll.setMaximumHeight(160)
-        self.checkbox_widget = QWidget()
-        self.checkbox_layout = QVBoxLayout(self.checkbox_widget)
-        self.checkbox_layout.setAlignment(Qt.AlignTop)
-        self.spectrum_scroll.setWidget(self.checkbox_widget)
-
-        header_layout = QHBoxLayout()
-        header_layout.addWidget(QLabel("✓"), 0)
-        header_layout.addWidget(QLabel("BG"), 0)
-        header_layout.addWidget(QLabel("Spectrum"), 1)
-        header_layout.addWidget(QLabel("Del"), 0)
-        control_layout.addLayout(header_layout)
-        control_layout.addWidget(self.spectrum_scroll)
+        control_layout.addLayout(side_by_side_layout)
 
         # Unmixing controls & Progress bar
         unmix_control = QHBoxLayout()
@@ -608,6 +704,21 @@ class UnmixerWindow(QMainWindow):
 
         # Denoising
         denoise_menu = analysis_menu.addMenu("Denoise")
+        savgol_action = QAction("Savitzky-Golay Spectral Filter", self)
+        savgol_action.setToolTip("Polynomial spectral smoothing filter along Z-axis")
+        savgol_action.triggered.connect(self.denoise_savgol)
+        denoise_menu.addAction(savgol_action)
+
+        tv3d_action = QAction("3D Total Variation (3D-TV)", self)
+        tv3d_action.setToolTip("Spatial-spectral Chambolle total variation noise reduction")
+        tv3d_action.triggered.connect(self.denoise_tv3d)
+        denoise_menu.addAction(tv3d_action)
+
+        bm4d_action = QAction("BM4D / FastHyDe Subspace Filter", self)
+        bm4d_action.setToolTip("Non-local 4D patch matching and subspace noise filtering")
+        bm4d_action.triggered.connect(self.denoise_bm4d)
+        denoise_menu.addAction(bm4d_action)
+
         mppca_action = QAction("MPPCA (Multiplicative PCA)", self)
         mppca_action.triggered.connect(self.denoise_mppca)
         denoise_menu.addAction(mppca_action)
@@ -618,6 +729,17 @@ class UnmixerWindow(QMainWindow):
 
         # Unmixing
         unmix_menu = analysis_menu.addMenu("Unmixing")
+        nnls_action = QAction("NNLS Linear Unmixing (via ROIs / Ref Spectra)", self)
+        nnls_action.setToolTip("Per-pixel Non-Negative Least Squares against saved ROIs or reference endmembers")
+        nnls_action.triggered.connect(self.run_linear_unmix)
+        unmix_menu.addAction(nnls_action)
+
+        fcls_action = QAction("FCLS (Fully Constrained Least Squares)", self)
+        fcls_action.setShortcut("Ctrl+L")
+        fcls_action.setToolTip("NNLS with sum-to-one constraint — gold standard for abundance estimation")
+        fcls_action.triggered.connect(self.run_fcls)
+        unmix_menu.addAction(fcls_action)
+
         mcr_action = QAction("MCR-ALS", self)
         mcr_action.setShortcut("Ctrl+M")
         mcr_action.triggered.connect(self.run_mcr_als)
@@ -632,18 +754,23 @@ class UnmixerWindow(QMainWindow):
         mesma_action.triggered.connect(self.run_mesma)
         unmix_menu.addAction(mesma_action)
 
-        # Decomposition
+        # Matrix Decomposition / Factor Analysis
         decomp_menu = analysis_menu.addMenu("Decomposition")
+        pca_action = QAction("PCA (Principal Component Analysis)", self)
+        pca_action.triggered.connect(self.run_pca)
+        decomp_menu.addAction(pca_action)
+
+        mnf_action = QAction("MNF (Minimum Noise Fraction)", self)
+        mnf_action.setToolTip("Orders components by SNR instead of variance — better than PCA for noisy data")
+        mnf_action.triggered.connect(self.run_mnf)
+        decomp_menu.addAction(mnf_action)
+
         ica_action = QAction("ICA (Independent Component Analysis)", self)
         ica_action.triggered.connect(self.run_ica)
         decomp_menu.addAction(ica_action)
 
-        # Classification
+        # Classification / Matching
         class_menu = analysis_menu.addMenu("Classification")
-        pca_action = QAction("PCA (Principal Component Analysis)", self)
-        pca_action.triggered.connect(self.run_pca)
-        class_menu.addAction(pca_action)
-
         sam_action = QAction("SAM (Spectral Angle Mapper)", self)
         sam_action.triggered.connect(self.run_sam)
         class_menu.addAction(sam_action)
@@ -652,9 +779,10 @@ class UnmixerWindow(QMainWindow):
         sid_action.triggered.connect(self.run_sid)
         class_menu.addAction(sid_action)
 
-        svr_action = QAction("SVR (Support Vector Regression)", self)
-        svr_action.triggered.connect(self.run_svr)
-        class_menu.addAction(svr_action)
+        rx_action = QAction("RX Anomaly Detection", self)
+        rx_action.setToolTip("Reed-Xiaoli Mahalanobis distance anomaly detection (no reference needed)")
+        rx_action.triggered.connect(self.run_rx)
+        class_menu.addAction(rx_action)
 
         analysis_menu.addSeparator()
 
@@ -763,8 +891,10 @@ class UnmixerWindow(QMainWindow):
             wavelengths = np.array([float(x) for x in wl_str.split(',')])
 
         data = np.fromfile(dat_path, dtype=dtype)
-        if interleave in ('bil', 'bsq'):
+        if interleave == 'bsq':
             data = data.reshape((bands, lines, samples)).transpose(1, 2, 0)
+        elif interleave == 'bil':
+            data = data.reshape((lines, bands, samples)).transpose(0, 2, 1)
         elif interleave == 'bip':
             data = data.reshape((lines, samples, bands))
 
@@ -819,6 +949,7 @@ class UnmixerWindow(QMainWindow):
     def set_data(self, hypercube, metadata=None):
         """Initialize hypercube data and setup slider/crosshairs."""
         self.hypercube = np.asarray(hypercube, dtype=float)
+        self.raw_hypercube = self.hypercube.copy()
         if metadata:
             self.metadata = metadata
         height, width, bands = self.hypercube.shape
@@ -834,6 +965,27 @@ class UnmixerWindow(QMainWindow):
         self.frame_label.setText(f"Frame: 0 / {bands - 1}")
 
         self._on_data_loaded()
+
+    def restart_analysis(self):
+        """Reset hypercube data back to original raw intensity and restore initial state."""
+        if hasattr(self, 'raw_hypercube') and self.raw_hypercube is not None:
+            self.hypercube = self.raw_hypercube.copy()
+            self.background_spectrum = None
+            if hasattr(self, 'subtract_bg_btn'):
+                self.subtract_bg_btn.setChecked(False)
+            if hasattr(self, 'bg_status_label'):
+                self.bg_status_label.setText("Background: None")
+                self.bg_status_label.setStyleSheet("color: gray;")
+            if hasattr(self, 'norm_mode_combo'):
+                self.norm_mode_combo.blockSignals(True)
+                self.norm_mode_combo.setCurrentIndex(0) # Original (Raw)
+                self.norm_mode_combo.blockSignals(False)
+            self.display_frame(self.current_frame)
+            self.update_spectrum_plot()
+            self.statusBar().showMessage("Restarted: Restored hypercube to original raw intensity.")
+            QMessageBox.information(self, "Restart Complete", "Restored hypercube to original raw intensity.\nBackground subtraction and denoising filters have been reset.")
+        else:
+            QMessageBox.warning(self, "No Original Data", "No original hypercube data found to restore.")
 
     def prev_frame(self):
         """Step backward 1 frame."""
@@ -871,14 +1023,27 @@ class UnmixerWindow(QMainWindow):
 
         height, width, bands = self.hypercube.shape
         frame_idx = max(0, min(frame_idx, bands - 1))
+        self.current_frame = frame_idx
+
+        # Determine spatial matrix to display on main view (XY)
+        active_comp = self.component_combo.currentData() if hasattr(self, 'component_combo') else 'total'
+        if active_comp == 'total' or active_comp is None or self.concentrations is None:
+            disp_image = self.hypercube[:, :, frame_idx]
+        elif active_comp == 'r2' and self.r_squared is not None:
+            disp_image = self.r_squared
+        elif active_comp == 'residual' and self.residuals is not None:
+            disp_image = self.residuals
+        elif isinstance(active_comp, int) and self.concentrations is not None and active_comp < self.concentrations.shape[2]:
+            disp_image = self.concentrations[:, :, active_comp]
+        else:
+            disp_image = self.hypercube[:, :, frame_idx]
 
         # Determine color limits (vmin, vmax)
         if hasattr(self, 'clim') and self.clim is not None:
             vmin, vmax = self.clim
         else:
-            frame_data = self.hypercube[:, :, frame_idx]
-            vmin = float(np.nanmin(frame_data))
-            vmax = float(np.nanmax(frame_data))
+            vmin = float(np.nanmin(disp_image))
+            vmax = float(np.nanmax(disp_image))
             if vmin == vmax:
                 vmax = vmin + 1.0
 
@@ -893,7 +1058,7 @@ class UnmixerWindow(QMainWindow):
 
         # Main Spatial View (XY)
         self.ax_main.clear()
-        im = self.ax_main.imshow(self.hypercube[:, :, frame_idx], cmap=self.current_colormap,
+        im = self.ax_main.imshow(disp_image, cmap=self.current_colormap,
                                 vmin=vmin, vmax=vmax,
                                 interpolation='nearest', extent=[-0.5, width - 0.5, height - 0.5, -0.5])
         self.ax_main.set_xlim(-0.5, width - 0.5)
@@ -942,10 +1107,24 @@ class UnmixerWindow(QMainWindow):
         self.concentrations = None
         self.r_squared = None
         self.residuals = None
-        self.export_action.setEnabled(False)
+        self.saved_xlim = None
+        self.saved_ylim = None
+        if hasattr(self, 'export_action'):
+            self.export_action.setEnabled(False)
+
+        if hasattr(self, 'roi_x_spin') and hasattr(self, 'roi_y_spin'):
+            self.roi_x_spin.blockSignals(True)
+            self.roi_y_spin.blockSignals(True)
+            self.roi_x_spin.setRange(0, W - 1)
+            self.roi_y_spin.setRange(0, H - 1)
+            self.roi_x_spin.setValue(self.crosshair_x)
+            self.roi_y_spin.setValue(self.crosshair_y)
+            self.roi_x_spin.blockSignals(False)
+            self.roi_y_spin.blockSignals(False)
 
         self.display_frame(self.current_frame)
-        self._plot_spectrum(self.hypercube[H // 2, W // 2, :])
+        self._update_roi_from_position(self.crosshair_x, self.crosshair_y)
+        self.autoscale_axes()
         self.statusBar().showMessage(f"Loaded Hypercube: {H}x{W}x{L}")
 
     # -----------------------------------------------------------------------
@@ -1140,6 +1319,8 @@ class UnmixerWindow(QMainWindow):
             self.current_selection = {
                 'type': self.selection_tool,
                 'coords': (float(x0), float(y0)),
+                'x': int(round(x0)),
+                'y': int(round(y0)),
                 'radius': radius_val,
                 'size': size_val,
                 'spectrum': mean_spectrum,
@@ -1150,6 +1331,15 @@ class UnmixerWindow(QMainWindow):
             self.update_spectrum_plot()
             self.add_btn.setEnabled(True)
 
+            # Update X/Y spinboxes
+            if hasattr(self, 'roi_x_spin') and hasattr(self, 'roi_y_spin'):
+                self.roi_x_spin.blockSignals(True)
+                self.roi_y_spin.blockSignals(True)
+                self.roi_x_spin.setValue(int(round(x0)))
+                self.roi_y_spin.setValue(int(round(y0)))
+                self.roi_x_spin.blockSignals(False)
+                self.roi_y_spin.blockSignals(False)
+
         if hasattr(self, 'current_patch') and self.current_patch:
             try:
                 self.current_patch.remove()
@@ -1157,6 +1347,111 @@ class UnmixerWindow(QMainWindow):
                 pass
             self.current_patch = None
         self.display_frame(self.current_frame)
+
+    def eventFilter(self, obj, event):
+        """Global Event Filter: Intercept Arrow Keys and Enter globally for ROI position nudging."""
+        if event.type() == QEvent.KeyPress and self.hypercube is not None:
+            key = event.key()
+            if key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down, Qt.Key_Return, Qt.Key_Enter):
+                focus_widget = QApplication.focusWidget()
+                if isinstance(focus_widget, (QLineEdit, QTextEdit)):
+                    return super().eventFilter(obj, event)
+
+                self.keyPressEvent(event)
+                return True
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event):
+        """Handle Arrow Keys to nudge ROI position pixel-by-pixel (Shift+Arrow for 5px jumps)."""
+        if self.hypercube is None:
+            super().keyPressEvent(event)
+            return
+
+        key = event.key()
+        if key not in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down, Qt.Key_Return, Qt.Key_Enter):
+            super().keyPressEvent(event)
+            return
+
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            self.add_current_spectrum()
+            return
+
+        step = 5 if (event.modifiers() & Qt.ShiftModifier) else 1
+        dx = -step if key == Qt.Key_Left else (step if key == Qt.Key_Right else 0)
+        dy = -step if key == Qt.Key_Up else (step if key == Qt.Key_Down else 0)
+
+        H, W, L = self.hypercube.shape
+        new_x = max(0, min(W - 1, self.crosshair_x + dx))
+        new_y = max(0, min(H - 1, self.crosshair_y + dy))
+
+        self.crosshair_x = new_x
+        self.crosshair_y = new_y
+
+        self.roi_x_spin.blockSignals(True)
+        self.roi_y_spin.blockSignals(True)
+        self.roi_x_spin.setValue(new_x)
+        self.roi_y_spin.setValue(new_y)
+        self.roi_x_spin.blockSignals(False)
+        self.roi_y_spin.blockSignals(False)
+
+        self._update_roi_from_position(new_x, new_y)
+
+    def _on_roi_spinbox_changed(self):
+        """Callback when X, Y, or Size spinboxes change manually."""
+        if self.hypercube is None:
+            return
+        x = self.roi_x_spin.value()
+        y = self.roi_y_spin.value()
+        self.crosshair_x = x
+        self.crosshair_y = y
+        self._update_roi_from_position(x, y)
+
+    def _update_roi_from_position(self, x, y):
+        """Re-extract ROI spectrum at (x, y) and redraw visual selection."""
+        if self.hypercube is None:
+            return
+
+        H, W, L = self.hypercube.shape
+        x = max(0, min(W - 1, x))
+        y = max(0, min(H - 1, y))
+
+        stype = self.selection_tool or 'point'
+        mask = np.zeros((H, W), dtype=bool)
+
+        if stype == 'point':
+            mask[y, x] = True
+            spectrum = self.hypercube[y, x, :]
+            self.current_selection = {
+                'type': 'point', 'x': x, 'y': y, 'coords': (float(x), float(y)),
+                'spectrum': spectrum, 'mask': mask,
+            }
+        elif stype in ('circle', 'square'):
+            size_px = self.size_spin.value()
+            r = size_px / 2.0
+            if stype == 'circle':
+                Y_grid, X_grid = np.ogrid[:H, :W]
+                mask[(X_grid - x)**2 + (Y_grid - y)**2 <= r**2] = True
+            else: # square
+                x0 = max(0, int(round(x - r)))
+                x1 = min(W - 1, int(round(x + r)))
+                y0 = max(0, int(round(y - r)))
+                y1 = min(H - 1, int(round(y + r)))
+                mask[y0:y1+1, x0:x1+1] = True
+
+            if not np.any(mask):
+                mask[y, x] = True
+
+            spectra = self.hypercube[mask]
+            spectrum = spectra.mean(axis=0)
+            self.current_selection = {
+                'type': stype, 'coords': (float(x), float(y)), 'x': x, 'y': y,
+                'radius': r, 'size': size_px,
+                'spectrum': spectrum, 'mask': mask, 'n_pixels': int(mask.sum()),
+            }
+
+        self._plot_spectrum(spectrum)
+        self.display_frame(self.current_frame)
+        self.add_btn.setEnabled(True)
 
     def _align_side_views(self, event=None):
         if not hasattr(self, 'ax_main') or self.ax_main is None or self.ax_x_spectral is None or self.ax_y_spectral is None:
@@ -1249,7 +1544,7 @@ class UnmixerWindow(QMainWindow):
             self.ax_spectrum.set_xlim(x_min_val - x_margin, x_max_val + x_margin)
             self.ax_spectrum.set_ylim(y_min_val - y_margin, y_max_val + y_margin)
 
-        if self.axes_locked:
+        if self.axes_locked and all_xmin and all_ymax:
             self.saved_xlim = self.ax_spectrum.get_xlim()
             self.saved_ylim = self.ax_spectrum.get_ylim()
         self.spectrum_canvas.draw_idle()
@@ -1280,57 +1575,110 @@ class UnmixerWindow(QMainWindow):
         self.ax_spectrum.set_ylim(new_ymin, new_ymax)
         self.spectrum_canvas.draw_idle()
 
+    def _apply_spectral_normalization(self, spec, mode):
+        """Helper to apply chosen spectral normalization / chemometric standardisation."""
+        spec = np.asarray(spec, dtype=np.float64).copy()
+        if mode == 'total':
+            tot = np.sum(np.abs(spec))
+            return spec / tot if tot > 0 else spec
+        elif mode == 'peak':
+            pk = np.max(np.abs(spec))
+            return spec / pk if pk > 0 else spec
+        elif mode == 'l2':
+            norm = np.linalg.norm(spec)
+            return spec / norm if norm > 0 else spec
+        elif mode == 'snv':
+            std = np.std(spec)
+            return (spec - np.mean(spec)) / std if std > 0 else (spec - np.mean(spec))
+        return spec
+
+    def _on_plot_tab_changed(self, index):
+        """Callback when user switches between Tab 1 (Extracted) and Tab 2 (Analysis)."""
+        if index == 0:
+            self.update_spectrum_plot()
+        elif index == 1:
+            self.update_basis_plot()
+
+    def on_norm_mode_changed(self):
+        """Callback when user selects a different normalization dropdown mode."""
+        self.update_spectrum_plot()
+        self.update_basis_plot()
+        if hasattr(self, 'unmixing_done') and self.unmixing_done and self.basis_spectra is not None:
+            mode_lbl = self.norm_mode_combo.currentText()
+            self._apply_unmixing_result({'concentrations': self.concentrations, 'basis_spectra': self.basis_spectra, 'r_squared': self.r_squared, 'residuals': self.residuals}, f"Analysis ({mode_lbl})")
+
     def update_spectrum_plot(self):
         """Plot all saved spectra plus current active selection (matching HyperViewer)."""
         self.ax_spectrum.clear()
-        sub_bg = self.subtract_bg_btn.isChecked() and self.background_spectrum is not None
+        sub_bg = hasattr(self, 'subtract_bg_btn') and self.subtract_bg_btn.isChecked() and self.background_spectrum is not None
+        mode = self.norm_mode_combo.currentData() if hasattr(self, 'norm_mode_combo') else 'raw'
 
         has_data = False
         # 1. Plot all saved/added spectra
         for sdata in self.spectra_list:
             if not sdata.visible:
                 continue
-            spec = sdata.spectrum - self.background_spectrum if sub_bg else sdata.spectrum
+            spec = (sdata.spectrum - self.background_spectrum) if sub_bg else sdata.spectrum.copy()
+            spec = self._apply_spectral_normalization(spec, mode)
+
             wl = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, len(spec) + 1, dtype=float)
-            self.ax_spectrum.plot(wl, spec, color=sdata.color, label=sdata.label, linewidth=1.5)
+            ls = getattr(sdata, 'linestyle', '-')
+            self.ax_spectrum.plot(wl, spec, color=sdata.color, linestyle=ls, label=sdata.label, linewidth=1.8)
 
             if sdata.std is not None:
+                std = self._apply_spectral_normalization(sdata.std, mode) if mode != 'raw' else sdata.std
                 self.ax_spectrum.fill_between(
-                    wl, spec - sdata.std, spec + sdata.std,
+                    wl, spec - std, spec + std,
                     alpha=0.2, color=sdata.color)
             has_data = True
 
         # 2. Plot active selection on top as 'Current' (black dashed line)
         if self.current_selection is not None and 'spectrum' in self.current_selection:
-            spec = self.current_selection['spectrum']
+            spec = self.current_selection['spectrum'].copy()
             if sub_bg and self.background_spectrum is not None:
                 spec = spec - self.background_spectrum
+            spec = self._apply_spectral_normalization(spec, mode)
+
             wl = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, len(spec) + 1, dtype=float)
             self.ax_spectrum.plot(wl, spec, 'k--', linewidth=1.5, label='Current')
 
             if self.current_selection.get('std') is not None:
-                std = self.current_selection['std']
+                std = self._apply_spectral_normalization(self.current_selection['std'], mode) if mode != 'raw' else self.current_selection['std']
                 self.ax_spectrum.fill_between(
                     wl, spec - std, spec + std,
                     alpha=0.25, color='black')
             has_data = True
 
         self.ax_spectrum.set_xlabel("Wavelength / Band")
-        self.ax_spectrum.set_ylabel("Intensity")
-        self.ax_spectrum.set_title("Extracted Spectra")
+        mode_titles = {
+            'raw': "Intensity",
+            'total': "Total Normalized Intensity (spec / sum)",
+            'peak': "Peak Normalized Intensity (spec / max)",
+            'l2': "L2 Normalized Intensity (unit vector)",
+            'snv': "SNV Z-Score ((spec - μ) / σ)"
+        }
+        self.ax_spectrum.set_ylabel(mode_titles.get(mode, "Intensity"))
+        self.ax_spectrum.set_title(f"Extracted Spectra ({mode_titles.get(mode, 'Original')})")
 
         if has_data:
             self.ax_spectrum.legend(loc='upper right', fontsize=8)
+            self.ax_spectrum.relim()
+            d = self.ax_spectrum.dataLim
+            if np.isfinite(d.xmin) and np.isfinite(d.xmax) and np.isfinite(d.ymin) and np.isfinite(d.ymax):
+                x_margin = (d.xmax - d.xmin) * 0.05 if d.xmax != d.xmin else 1.0
+                y_margin = (d.ymax - d.ymin) * 0.05 if d.ymax != d.ymin else 0.1
+                computed_xlim = (d.xmin - x_margin, d.xmax + x_margin)
+                computed_ylim = (d.ymin - y_margin, d.ymax + y_margin)
+                if not self.axes_locked or self.saved_xlim is None or self.saved_ylim is None:
+                    self.ax_spectrum.set_xlim(computed_xlim)
+                    self.ax_spectrum.set_ylim(computed_ylim)
+                    self.saved_xlim = computed_xlim
+                    self.saved_ylim = computed_ylim
+                else:
+                    self.ax_spectrum.set_xlim(self.saved_xlim)
+                    self.ax_spectrum.set_ylim(self.saved_ylim)
 
         self.ax_spectrum.grid(True, alpha=0.3)
-
-        if self.axes_locked:
-            if self.saved_xlim is None or self.saved_ylim is None:
-                self.saved_xlim = self.ax_spectrum.get_xlim()
-                self.saved_ylim = self.ax_spectrum.get_ylim()
-            else:
-                self.ax_spectrum.set_xlim(self.saved_xlim)
-                self.ax_spectrum.set_ylim(self.saved_ylim)
 
         self.spectrum_canvas.draw_idle()
 
@@ -1340,6 +1688,61 @@ class UnmixerWindow(QMainWindow):
     def _plot_residual(self, residual=None):
         self.update_spectrum_plot()
 
+    def autoscale_y_axis(self):
+        """Autoscale Y-axis limits to fit all visible spectra on active tab while keeping X range."""
+        active_tab = self.plot_tabs.currentIndex() if hasattr(self, 'plot_tabs') else 0
+        if active_tab == 0:
+            ax = self.ax_spectrum
+            canvas = self.spectrum_canvas
+            mode = self.norm_mode_combo.currentData() if hasattr(self, 'norm_mode_combo') else 'raw'
+            sub_bg = hasattr(self, 'subtract_bg_btn') and self.subtract_bg_btn.isChecked() and self.background_spectrum is not None
+            xlim = ax.get_xlim()
+
+            all_spectra = []
+            for sdata in self.spectra_list:
+                if not sdata.visible:
+                    continue
+                spec = (sdata.spectrum - self.background_spectrum) if sub_bg else sdata.spectrum.copy()
+                all_spectra.append(self._apply_spectral_normalization(spec, mode))
+
+            if self.current_selection is not None and 'spectrum' in self.current_selection:
+                spec = self.current_selection['spectrum'].copy()
+                if sub_bg and self.background_spectrum is not None:
+                    spec = spec - self.background_spectrum
+                all_spectra.append(self._apply_spectral_normalization(spec, mode))
+
+            y_vals = []
+            for spec in all_spectra:
+                wl = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, len(spec) + 1, dtype=float)
+                mask = (wl >= xlim[0]) & (wl <= xlim[1])
+                if np.any(mask):
+                    y_vals.extend(spec[mask])
+
+            if y_vals:
+                ymin, ymax = float(np.min(y_vals)), float(np.max(y_vals))
+                margin = (ymax - ymin) * 0.05 if ymax != ymin else 1.0
+                ax.set_ylim(ymin - margin, ymax + margin)
+                canvas.draw_idle()
+        else:
+            ax = self.ax_analysis
+            canvas = self.analysis_canvas
+            mode = self.norm_mode_combo.currentData() if hasattr(self, 'norm_mode_combo') else 'raw'
+            xlim = ax.get_xlim()
+            y_vals = []
+            if hasattr(self, 'basis_spectra_list') and self.basis_spectra_list:
+                for sdata in self.basis_spectra_list:
+                    if getattr(sdata, 'visible', True):
+                        spec = self._apply_spectral_normalization(sdata.spectrum, mode)
+                        wl = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, len(spec) + 1, dtype=float)
+                        mask = (wl >= xlim[0]) & (wl <= xlim[1])
+                        if np.any(mask):
+                            y_vals.extend(spec[mask])
+            if y_vals:
+                ymin, ymax = float(np.min(y_vals)), float(np.max(y_vals))
+                margin = (ymax - ymin) * 0.05 if ymax != ymin else 1.0
+                ax.set_ylim(ymin - margin, ymax + margin)
+                canvas.draw_idle()
+
     def add_current_spectrum(self):
         if self.current_selection is None or 'spectrum' not in self.current_selection:
             return
@@ -1347,7 +1750,7 @@ class UnmixerWindow(QMainWindow):
         spec = sel['spectrum']
         std = sel.get('std', None)
         stype = sel.get('type', 'point')
-        lbl = f"Spectrum {len(self.spectra_list) + 1} ({stype})"
+        lbl = f"ROI {len(self.spectra_list) + 1}"
         colors = ['blue', 'green', 'red', 'cyan', 'magenta', 'yellow', 'orange', 'purple']
         color = colors[len(self.spectra_list) % len(colors)]
 
@@ -1365,7 +1768,7 @@ class UnmixerWindow(QMainWindow):
             self.display_frame(self.current_frame)
 
     def update_checkbox_list(self):
-        # Clear existing list
+        # Clear existing ROI list
         while self.checkbox_layout.count():
             child = self.checkbox_layout.takeAt(0)
             if child.widget():
@@ -1383,24 +1786,215 @@ class UnmixerWindow(QMainWindow):
             chk.stateChanged.connect(lambda state, i=idx: self.toggle_spectrum_visibility(i))
             row.addWidget(chk)
 
-            radio = QRadioButton()
-            self.bg_radio_group.addButton(radio, idx)
-            row.addWidget(radio)
-
             lbl = QLabel(sdata.label)
-            lbl.setStyleSheet(f"color: {sdata.color};")
+            lbl.setStyleSheet(f"color: {sdata.color}; font-size: 11px; font-weight: normal;")
             row.addWidget(lbl)
             row.addStretch()
 
             del_btn = QPushButton("×")
             del_btn.setFixedSize(20, 20)
+            del_btn.setToolTip("Delete this ROI spectrum")
             del_btn.clicked.connect(lambda checked, i=idx: self.delete_single_spectrum(i))
             row.addWidget(del_btn)
 
             self.checkbox_layout.addLayout(row)
 
-        self.delete_btn.setEnabled(len(self.spectra_list) > 0)
+        if hasattr(self, 'delete_btn'):
+            self.delete_btn.setEnabled(len(self.spectra_list) > 0)
         self.set_bg_btn.setEnabled(len(self.spectra_list) > 0)
+
+    def copy_roi_to_basis(self):
+        """➡️ Copy checked ROI spectra from Left list to Right Basis list."""
+        if not hasattr(self, 'basis_spectra_list'):
+            self.basis_spectra_list = []
+
+        active_rois = [s for s in self.spectra_list if getattr(s, 'visible', True)]
+        if not active_rois:
+            QMessageBox.warning(self, "No ROI Selected", "Check at least 1 ROI spectrum in the left list to copy to Basis.")
+            return
+
+        copied_count = 0
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        for sdata in active_rois:
+            b_label = sdata.label
+            new_sdata = SpectrumData(
+                sdata.spectrum.copy(), std=None, label=b_label, color=colors[len(self.basis_spectra_list) % len(colors)],
+                selection_type='basis', coords=None, mask=None
+            )
+            self.basis_spectra_list.append(new_sdata)
+            copied_count += 1
+
+        self.update_basis_checkbox_list()
+        self._update_basis_matrix_from_list()
+        self.statusBar().showMessage(f"Copied {copied_count} ROI spectra to Basis Fitting Library.")
+
+    def update_basis_checkbox_list(self):
+        """Update Right List Box (Basis / Reference Spectra)."""
+        if not hasattr(self, 'basis_spectra_list'):
+            self.basis_spectra_list = []
+
+        while self.basis_layout.count():
+            child = self.basis_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+            elif child.layout():
+                while child.layout().count():
+                    sub = child.layout().takeAt(0)
+                    if sub.widget():
+                        sub.widget().deleteLater()
+
+        for idx, sdata in enumerate(self.basis_spectra_list):
+            row = QHBoxLayout()
+            chk = QCheckBox()
+            chk.setChecked(getattr(sdata, 'visible', True))
+            chk.stateChanged.connect(lambda state, i=idx: self.toggle_basis_visibility(i))
+            row.addWidget(chk)
+
+            lbl = QLabel(sdata.label)
+            lbl.setStyleSheet(f"color: {sdata.color}; font-size: 11px; font-weight: normal;")
+            row.addWidget(lbl)
+            row.addStretch()
+
+            del_btn = QPushButton("×")
+            del_btn.setFixedSize(20, 20)
+            del_btn.setToolTip("Delete this basis spectrum")
+            del_btn.clicked.connect(lambda checked, i=idx: self.delete_single_basis_spectrum(i))
+            row.addWidget(del_btn)
+
+            self.basis_layout.addLayout(row)
+
+    def toggle_basis_visibility(self, index):
+        if hasattr(self, 'basis_spectra_list') and 0 <= index < len(self.basis_spectra_list):
+            self.basis_spectra_list[index].visible = not getattr(self.basis_spectra_list[index], 'visible', True)
+            self._update_basis_matrix_from_list()
+
+    def delete_single_basis_spectrum(self, index):
+        if hasattr(self, 'basis_spectra_list') and 0 <= index < len(self.basis_spectra_list):
+            self.basis_spectra_list.pop(index)
+            self.update_basis_checkbox_list()
+            self._update_basis_matrix_from_list()
+
+    def _update_basis_matrix_from_list(self):
+        if not hasattr(self, 'basis_spectra_list') or not self.basis_spectra_list:
+            self.basis_spectra = None
+            self.basis_labels = []
+            self.update_basis_plot()
+            return
+
+        active_basis = [s for s in self.basis_spectra_list if getattr(s, 'visible', True)]
+        if active_basis:
+            self.basis_spectra = np.array([s.spectrum for s in active_basis])
+            self.basis_labels = [s.label for s in active_basis]
+            first_len = len(active_basis[0].spectrum)
+            if self.basis_wavelengths is None or len(self.basis_wavelengths) != first_len:
+                self.basis_wavelengths = np.arange(1, first_len + 1, dtype=float)
+        else:
+            self.basis_spectra = None
+            self.basis_labels = []
+
+        self.update_basis_plot()
+
+    def update_basis_plot(self):
+        """Plot all active basis/reference spectra on Tab 2 (Analysis Results & Fitting)."""
+        if not hasattr(self, 'analysis_fig') or self.analysis_fig is None:
+            return
+        self.analysis_fig.clear()
+        mode = self.norm_mode_combo.currentData() if hasattr(self, 'norm_mode_combo') else 'raw'
+        if hasattr(self, 'basis_spectra_list') and self.basis_spectra_list:
+            active_basis = [s for s in self.basis_spectra_list if getattr(s, 'visible', True)]
+            if active_basis:
+                ax = self.analysis_fig.add_subplot(111)
+                first_len = len(active_basis[0].spectrum)
+                wl = self.basis_wavelengths if self.basis_wavelengths is not None and len(self.basis_wavelengths) == first_len else np.arange(1, first_len + 1, dtype=float)
+                for sdata in active_basis:
+                    spec = self._apply_spectral_normalization(sdata.spectrum, mode)
+                    ax.plot(wl, spec, color=sdata.color, linewidth=2.0, label=sdata.label)
+
+                mode_titles = {
+                    'raw': "Amplitude / Intensity",
+                    'total': "Normalized Amplitude (spec / sum)",
+                    'peak': "Peak Normalized Amplitude (spec / max)",
+                    'l2': "L2 Vector Norm (spec / ||spec||)",
+                    'snv': "SNV Z-Score ((spec - μ) / σ)"
+                }
+                ax.set_xlabel("Spectral Band / Wavelength")
+                ax.set_ylabel(mode_titles.get(mode, "Amplitude"))
+                ax.set_title(f"Basis & Reference Spectra Library (K={len(active_basis)}) [{mode_titles.get(mode, 'Original')}]")
+                ax.grid(True, alpha=0.3)
+                ax.legend(loc='upper right', fontsize=8)
+
+        self.analysis_fig.tight_layout()
+        self.analysis_canvas.draw_idle()
+
+    def fit_selected_roi_to_basis(self):
+        """Fit checked/selected ROI spectrum against Basis spectra using NNLS and plot fit + residual."""
+        active_rois = [s for s in self.spectra_list if getattr(s, 'visible', True)]
+        if not active_rois:
+            QMessageBox.warning(self, "No ROI Selected", "Select or check at least 1 ROI spectrum in the left list to fit.")
+            return
+
+        if not hasattr(self, 'basis_spectra_list') or not self.basis_spectra_list:
+            QMessageBox.warning(self, "No Basis Spectra", "No basis spectra in the right list! Click '➡️ Add to Basis' or load reference spectra first.")
+            return
+
+        active_basis = [s for s in self.basis_spectra_list if getattr(s, 'visible', True)]
+        if not active_basis:
+            QMessageBox.warning(self, "No Basis Spectra Checked", "Check at least 1 basis spectrum in the right list.")
+            return
+
+        mode = self.norm_mode_combo.currentData() if hasattr(self, 'norm_mode_combo') else 'raw'
+
+        target_sdata = active_rois[0]
+        measured_spec = self._apply_spectral_normalization(target_sdata.spectrum, mode)
+        basis_matrix = np.array([self._apply_spectral_normalization(b.spectrum, mode) for b in active_basis])
+        basis_labels = [b.label for b in active_basis]
+        basis_colors = [b.color for b in active_basis]
+
+        first_len = len(measured_spec)
+        wl = self.basis_wavelengths if self.basis_wavelengths is not None and len(self.basis_wavelengths) == first_len else np.arange(1, first_len + 1, dtype=float)
+
+        try:
+            from scipy.optimize import nnls
+            coeffs, _ = nnls(basis_matrix.T, measured_spec)
+        except Exception:
+            coeffs, _, _, _ = np.linalg.lstsq(basis_matrix.T, measured_spec, rcond=None)
+            coeffs = np.maximum(coeffs, 0)
+
+        fitted_spec = basis_matrix.T @ coeffs
+        residuals = measured_spec - fitted_spec
+        ss_res = np.sum(residuals ** 2)
+        ss_tot = np.sum((measured_spec - np.mean(measured_spec)) ** 2)
+        r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+        rms_err = np.sqrt(np.mean(residuals ** 2))
+
+        tot_c = np.sum(coeffs)
+        percents = (coeffs / tot_c * 100.0) if tot_c > 0 else np.zeros_like(coeffs)
+
+        # Add Fitted Spectrum (dashed red line) and Residual Spectrum (dotted magenta line) to ROI list (Left side)
+        fit_label = f"[Fit] {target_sdata.label}"
+        sdata_fit = SpectrumData(
+            fitted_spec, std=None, label=fit_label, color='red',
+            selection_type='fit', coords=None, mask=None, linestyle='--'
+        )
+        self.spectra_list.append(sdata_fit)
+
+        res_label = f"[Res] {target_sdata.label}"
+        sdata_res = SpectrumData(
+            residuals, std=None, label=res_label, color='magenta',
+            selection_type='fit', coords=None, mask=None, linestyle=':'
+        )
+        self.spectra_list.append(sdata_res)
+
+        self.update_checkbox_list()
+        self.update_spectrum_plot()
+
+        if hasattr(self, 'plot_tabs'):
+            self.plot_tabs.setCurrentIndex(0) # Switch to Tab 1 (Extracted Spectra)
+
+        msg = f"NNLS Fit for {target_sdata.label}:\nR² = {r2:.4f}, RMS Error = {rms_err:.4e}\n\nComponents:\n"
+        for k in range(len(active_basis)):
+            msg += f"  • {basis_labels[k]}: coeff = {coeffs[k]:.4f} ({percents[k]:.1f}%)\n"
+        QMessageBox.information(self, "ROI Fit Complete", msg)
 
     def toggle_spectrum_visibility(self, index):
         if 0 <= index < len(self.spectra_list):
@@ -1452,8 +2046,13 @@ class UnmixerWindow(QMainWindow):
         if 0 <= bg_id < len(self.spectra_list):
             self.background_spectrum = self.spectra_list[bg_id].spectrum.copy()
             self.subtract_bg_btn.setEnabled(True)
-            self.bg_status_label.setText(f"Background: {self.spectra_list[bg_id].label}")
-            self.bg_status_label.setStyleSheet("color: green; font-weight: bold;")
+            lbl_text = f"Background: {self.spectra_list[bg_id].label}"
+            if hasattr(self, 'bg_status_label') and self.bg_status_label is not None:
+                self.bg_status_label.setText(lbl_text)
+                self.bg_status_label.setStyleSheet("color: green; font-weight: bold;")
+            self.statusBar().showMessage(f"Set background spectrum to: {self.spectra_list[bg_id].label}")
+        else:
+            QMessageBox.warning(self, "No Spectrum Selected", "Add a spectrum to the list first or select a radio button to set as background.")
 
     def toggle_background_subtraction(self):
         if self.background_spectrum is None:
@@ -1465,22 +2064,59 @@ class UnmixerWindow(QMainWindow):
         self.update_spectrum_plot()
 
     def _export_all_spectra(self):
-        if not self.spectra_list:
-            return
-        file_path, _ = QFileDialog.getSaveFileName(self, "Export Spectra", "", "CSV Files (*.csv)")
-        if not file_path:
-            return
-        try:
-            first_len = len(self.spectra_list[0].spectrum)
-            wl = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, first_len + 1, dtype=float)
-            with open(file_path, 'w') as f:
-                f.write("Wavelength," + ",".join(s.label for s in self.spectra_list) + "\n")
-                for i, w in enumerate(wl):
-                    row = [str(w)] + [str(s.spectrum[i]) if i < len(s.spectrum) else "" for s in self.spectra_list]
-                    f.write(",".join(row) + "\n")
-            self.statusBar().showMessage(f"Exported spectra to {file_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "Export Error", str(e))
+        """
+        Smart Export Spectra:
+        Exports whatever spectra are currently displayed in the active tab/window:
+        - Tab 1 (Extracted Spectra): Exports saved ROI & point spectra.
+        - Tab 2 (Analysis Results & Fitting): Exports unmixed component spectra / endmembers.
+        """
+        is_analysis_tab = hasattr(self, 'plot_tabs') and self.plot_tabs.currentIndex() == 1
+
+        if is_analysis_tab and self.basis_spectra is not None:
+            # Export Component / Endmember Spectra from Analysis Window
+            file_path, _ = QFileDialog.getSaveFileName(self, "Export Analysis Component Spectra", "", "CSV Files (*.csv);;NumPy Files (*.npy)")
+            if not file_path:
+                return
+            try:
+                K, L = self.basis_spectra.shape
+                wl = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, L + 1, dtype=float)
+                labels = self.basis_labels or [f"Component {i+1}" for i in range(K)]
+
+                if file_path.endswith('.npy'):
+                    np.save(file_path, {'spectra': self.basis_spectra, 'labels': labels, 'wavelengths': wl})
+                else:
+                    with open(file_path, 'w') as f:
+                        f.write("Wavelength," + ",".join(labels) + "\n")
+                        for i, w in enumerate(wl):
+                            row = [str(w)] + [str(self.basis_spectra[j, i]) for j in range(K)]
+                            f.write(",".join(row) + "\n")
+                self.statusBar().showMessage(f"Exported {K} component spectra to {file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Export Error", str(e))
+
+        elif self.spectra_list:
+            # Export Saved ROI Spectra from ROI Manager Window
+            file_path, _ = QFileDialog.getSaveFileName(self, "Export ROI Spectra", "", "CSV Files (*.csv);;NumPy Files (*.npy)")
+            if not file_path:
+                return
+            try:
+                first_len = len(self.spectra_list[0].spectrum)
+                wl = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, first_len + 1, dtype=float)
+                if file_path.endswith('.npy'):
+                    np.save(file_path, {'spectra': np.array([s.spectrum for s in self.spectra_list]),
+                                        'labels': [s.label for s in self.spectra_list],
+                                        'wavelengths': wl})
+                else:
+                    with open(file_path, 'w') as f:
+                        f.write("Wavelength," + ",".join(s.label for s in self.spectra_list) + "\n")
+                        for i, w in enumerate(wl):
+                            row = [str(w)] + [str(s.spectrum[i]) if i < len(s.spectrum) else "" for s in self.spectra_list]
+                            f.write(",".join(row) + "\n")
+                self.statusBar().showMessage(f"Exported {len(self.spectra_list)} ROI spectra to {file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Export Error", str(e))
+        else:
+            QMessageBox.warning(self, "No Spectra", "No spectra are currently displayed to export.")
 
     # -----------------------------------------------------------------------
     # Reference Spectra Library Loading & Transforming
@@ -1524,6 +2160,8 @@ class UnmixerWindow(QMainWindow):
                         break
             elif ext == '.npy':
                 data = np.load(file_path, allow_pickle=True)
+                if isinstance(data, np.ndarray) and data.ndim == 0:
+                    data = data.item()
                 if isinstance(data, dict):
                     spectra = np.array(data.get('spectra', []))
                     wavelengths = np.array(data.get('wavelengths', []), dtype=float) if 'wavelengths' in data else None
@@ -1545,21 +2183,37 @@ class UnmixerWindow(QMainWindow):
             self.reference_labels = labels
             self.reference_wavelengths = wavelengths
 
-            # Set as current basis spectra for unmixing & classification
             self.basis_spectra = spectra
             self.basis_labels = labels
             self.basis_wavelengths = wavelengths
 
+            # Add each reference spectrum directly into Right List Box (Basis / Reference Spectra)
+            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+            if not hasattr(self, 'basis_spectra_list'):
+                self.basis_spectra_list = []
+            for i in range(spectra.shape[0]):
+                lbl = labels[i]
+                sdata = SpectrumData(
+                    spectra[i], label=lbl, color=colors[i % len(colors)],
+                    selection_type='reference', coords=None
+                )
+                self.basis_spectra_list.append(sdata)
+
+            self.update_basis_checkbox_list()
+            self._update_basis_matrix_from_list()
+
             n_ref = len(labels)
             wl_range = f"{wavelengths[0]:.1f}–{wavelengths[-1]:.1f}"
-            self.ref_status_label.setText(f"Reference Spectra: {n_ref} loaded (λ: {wl_range})")
-            self.ref_status_label.setStyleSheet("color: green; font-weight: bold;")
-            self.transform_btn.setEnabled(True)
+            if hasattr(self, 'ref_status_label'):
+                self.ref_status_label.setText(f"Reference Spectra: {n_ref} loaded (λ: {wl_range})")
+                self.ref_status_label.setStyleSheet("color: green; font-weight: bold;")
+            if hasattr(self, 'transform_btn'):
+                self.transform_btn.setEnabled(True)
+            self.statusBar().showMessage(f"Loaded {n_ref} reference spectra into Basis library (λ: {wl_range})")
 
-            self._show_reference_window()
-            QMessageBox.information(self, "Reference Spectra Loaded",
-                                   f"Loaded {n_ref} reference spectra as calibration basis:\n" +
-                                   "\n".join(f"  • {lbl}" for lbl in labels[:10]))
+            if hasattr(self, 'plot_tabs'):
+                self.plot_tabs.setCurrentIndex(1) # Switch to Tab 2 (Analysis Results & Fitting)
+            self.statusBar().showMessage(f"Loaded {n_ref} reference spectra into Basis library.")
         except Exception as e:
             QMessageBox.critical(self, "Load Error", f"Failed to load reference spectra:\n{e}")
 
@@ -1683,6 +2337,50 @@ class UnmixerWindow(QMainWindow):
     # Unmixing & Analysis Algorithm Runners
     # -----------------------------------------------------------------------
 
+    def denoise_savgol(self):
+        if self.hypercube is None:
+            QMessageBox.warning(self, "No Data", "Load a hyperspectral image first.")
+            return
+        result = denoise_savgol(self.hypercube, window_length=7, polyorder=2)
+        self.hypercube = result["hypercube"]
+        self.display_frame(self.current_frame)
+        QMessageBox.information(self, "Savitzky-Golay Denoising Complete",
+                                f"Applied Savitzky-Golay Spectral Filter:\n"
+                                f"Window Length: {result['info']['window_length']} bands, Poly order: {result['info']['polyorder']}")
+
+    def denoise_tv3d(self):
+        if self.hypercube is None:
+            QMessageBox.warning(self, "No Data", "Load a hyperspectral image first.")
+            return
+        w, ok = QInputDialog.getDouble(self, "3D-TV Denoising", "Denoising Strength / Weight λ (higher = smoother):", 0.05, 0.001, 2.0, 3)
+        if not ok:
+            return
+        try:
+            result = denoise_tv3d(self.hypercube, weight=w, n_iter_max=30)
+            self.hypercube = result["hypercube"]
+            self.display_frame(self.current_frame)
+            self.update_spectrum_plot()
+            QMessageBox.information(self, "3D-TV Denoising Complete", f"3D Total Variation (TV) applied with smoothing weight λ = {w}.")
+        except Exception as e:
+            QMessageBox.critical(self, "3D-TV Denoising Error", str(e))
+
+    def denoise_bm4d(self):
+        if self.hypercube is None:
+            QMessageBox.warning(self, "No Data", "Load a hyperspectral image first.")
+            return
+        try:
+            result = denoise_bm4d(self.hypercube)
+            self.hypercube = result["hypercube"]
+            self.display_frame(self.current_frame)
+            self.update_spectrum_plot()
+            info = result['info']
+            msg = f"Algorithm: {info['algorithm']}"
+            if 'note' in info:
+                msg += f"\n\n{info['note']}"
+            QMessageBox.information(self, "BM4D Denoising Complete", msg)
+        except Exception as e:
+            QMessageBox.critical(self, "BM4D Denoising Error", str(e))
+
     def denoise_mppca(self):
         if self.hypercube is None:
             QMessageBox.warning(self, "No Data", "Load a hyperspectral image first.")
@@ -1713,11 +2411,15 @@ class UnmixerWindow(QMainWindow):
             QMessageBox.warning(self, "No Data", "Load a hyperspectral image first.")
             return
         H, W, L = self.hypercube.shape
+        n_comp, ok = QInputDialog.getInt(self, "MCR-ALS Unmixing", "Number of components / endmembers:", 3, 2, min(10, L - 1))
+        if not ok:
+            return
         self.progress_bar.setValue(10)
         self.unmix_status.setText("MCR-ALS in progress…")
         try:
-            result = run_mcr_als(self.hypercube, n_components=min(5, L-1), max_iter=100, non_neg=True)
-            self._apply_unmixing_result(result, "MCR-ALS")
+            result = run_mcr_als(self.hypercube, n_components=n_comp, max_iter=150, non_neg=True)
+            self.basis_labels = [f"MCR Component {i+1}" for i in range(n_comp)]
+            self._apply_unmixing_result(result, f"MCR-ALS (K={n_comp})")
         except Exception as e:
             QMessageBox.critical(self, "MCR-ALS Error", f"MCR-ALS failed:\n{e}")
 
@@ -1726,23 +2428,121 @@ class UnmixerWindow(QMainWindow):
             QMessageBox.warning(self, "No Data", "Load a hyperspectral image first.")
             return
         H, W, L = self.hypercube.shape
+        n_comp, ok = QInputDialog.getInt(self, "NMF Unmixing", "Number of components / endmembers:", 3, 2, min(10, L - 1))
+        if not ok:
+            return
         self.progress_bar.setValue(10)
         self.unmix_status.setText("NMF in progress…")
         try:
-            result = run_nmf(self.hypercube, n_components=min(5, L-1), max_iter=200)
-            self._apply_unmixing_result(result, "NMF")
+            result = run_nmf(self.hypercube, n_components=n_comp, max_iter=200)
+            self.basis_labels = [f"NMF Component {i+1}" for i in range(n_comp)]
+            self._apply_unmixing_result(result, f"NMF (K={n_comp})")
         except Exception as e:
             QMessageBox.critical(self, "NMF Error", f"NMF failed:\n{e}")
 
-    def run_mesma(self):
-        if self.hypercube is None or self.basis_spectra is None:
-            QMessageBox.warning(self, "No Basis Data", "Load reference spectra or extract endmembers first.")
+    def _get_normalized_hypercube(self):
+        """Return hypercube normalized according to active norm_mode_combo selection."""
+        if self.hypercube is None:
+            return None
+        mode = self.norm_mode_combo.currentData() if hasattr(self, 'norm_mode_combo') else 'raw'
+        if mode == 'raw':
+            return self.hypercube
+
+        H, W, L = self.hypercube.shape
+        cube = self.hypercube.astype(np.float64)
+        if mode == 'total':
+            tot = np.sum(np.abs(cube), axis=-1, keepdims=True)
+            return np.where(tot > 0, cube / tot, cube)
+        elif mode == 'peak':
+            pk = np.max(np.abs(cube), axis=-1, keepdims=True)
+            return np.where(pk > 0, cube / pk, cube)
+        elif mode == 'l2':
+            norm = np.linalg.norm(cube, axis=-1, keepdims=True)
+            return np.where(norm > 0, cube / norm, cube)
+        elif mode == 'snv':
+            std = np.std(cube, axis=-1, keepdims=True)
+            mean = np.mean(cube, axis=-1, keepdims=True)
+            return np.where(std > 0, (cube - mean) / std, cube - mean)
+        return cube
+
+    def _get_or_extract_basis_spectra(self, default_k=3):
+        """
+        Smart Basis Extractor pulling directly from Right List Box (Basis / Reference Spectra).
+        """
+        mode = self.norm_mode_combo.currentData() if hasattr(self, 'norm_mode_combo') else 'raw'
+        basis = None
+        labels = []
+
+        if hasattr(self, 'basis_spectra_list') and self.basis_spectra_list:
+            active_basis = [s for s in self.basis_spectra_list if getattr(s, 'visible', True)]
+            if active_basis:
+                basis = np.array([s.spectrum for s in active_basis])
+                labels = [s.label for s in active_basis]
+                self.basis_spectra = basis
+                self.basis_labels = labels
+
+        if basis is None and self.basis_spectra is not None:
+            basis = self.basis_spectra
+            labels = self.basis_labels or [f"Basis {i+1}" for i in range(basis.shape[0])]
+
+        if basis is None and self.hypercube is not None:
+            # Fallback: Auto-extract VCA endmembers if Basis list is completely empty
+            H, W, L = self.hypercube.shape
+            k = min(default_k, L - 1)
+            res = run_vca(self._get_normalized_hypercube(), n_endmembers=k)
+            basis = res['endmembers']
+            labels = [f"VCA Endmember {i+1}" for i in range(k)]
+            self.basis_spectra = basis
+            self.basis_labels = labels
+            if not hasattr(self, 'basis_spectra_list'):
+                self.basis_spectra_list = []
+            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+            for i in range(k):
+                sdata = SpectrumData(basis[i], label=labels[i], color=colors[i % len(colors)], selection_type='vca')
+                self.basis_spectra_list.append(sdata)
+            self.update_basis_checkbox_list()
+
+        if basis is not None and mode != 'raw':
+            norm_basis = np.array([self._apply_spectral_normalization(b, mode) for b in basis])
+            return norm_basis, labels
+
+        return basis, labels
+
+    def run_linear_unmix(self):
+        if self.hypercube is None:
+            QMessageBox.warning(self, "No Data", "Load a hyperspectral image first.")
             return
+        basis, labels = self._get_or_extract_basis_spectra()
+        if basis is None:
+            return
+        cube = self._get_normalized_hypercube()
         self.progress_bar.setValue(10)
-        self.unmix_status.setText("MESMA in progress…")
+        mode_txt = self.norm_mode_combo.currentText()
+        self.unmix_status.setText(f"NNLS Linear Unmixing [{mode_txt}] in progress…")
         try:
-            result = run_mesma(self.hypercube, self.basis_spectra)
-            self._apply_unmixing_result(result, "MESMA")
+            result = run_linear_unmix(cube, basis)
+            self._apply_unmixing_result(result, f"NNLS Linear Unmixing [{mode_txt}]")
+        except Exception as e:
+            QMessageBox.critical(self, "Linear Unmixing Error", f"NNLS Linear Unmixing failed:\n{e}")
+
+    def run_mesma(self):
+        if self.hypercube is None:
+            QMessageBox.warning(self, "No Data", "Load a hyperspectral image first.")
+            return
+        basis, labels = self._get_or_extract_basis_spectra()
+        if basis is None:
+            return
+        K = basis.shape[0]
+        max_end, ok = QInputDialog.getInt(self, "MESMA Parameters", f"Max endmembers allowed per pixel (Library size={K}):", min(3, K), 2, K)
+        if not ok:
+            return
+        cube = self._get_normalized_hypercube()
+        self.progress_bar.setValue(10)
+        mode_txt = self.norm_mode_combo.currentText()
+        self.unmix_status.setText(f"MESMA [{mode_txt}] in progress…")
+        try:
+            result = run_mesma(cube, basis, max_endmembers=max_end)
+            self._apply_unmixing_result(result, f"MESMA [{mode_txt}] (Max={max_end})")
         except Exception as e:
             QMessageBox.critical(self, "MESMA Error", f"MESMA failed:\n{e}")
 
@@ -1751,53 +2551,113 @@ class UnmixerWindow(QMainWindow):
             QMessageBox.warning(self, "No Data", "Load a hyperspectral image first.")
             return
         H, W, L = self.hypercube.shape
+        n_comp, ok = QInputDialog.getInt(self, "PCA Decomposition", "Number of Principal Components:", 3, 2, min(10, L - 1))
+        if not ok:
+            return
         try:
-            result = run_pca(self.hypercube, n_components=min(5, L-1))
-            self._apply_unmixing_result(result, "PCA")
+            cube = self._get_normalized_hypercube()
+            result = run_pca(cube, n_components=n_comp)
+            self.basis_labels = [f"PC-{i+1}" for i in range(n_comp)]
+            self._apply_unmixing_result(result, f"PCA (K={n_comp})")
         except Exception as e:
             QMessageBox.critical(self, "PCA Error", f"PCA failed:\n{e}")
 
     def run_sam(self):
-        if self.hypercube is None or self.basis_spectra is None:
-            QMessageBox.warning(self, "No Basis Data", "Load reference spectra or extract endmembers first.")
+        if self.hypercube is None:
+            QMessageBox.warning(self, "No Data", "Load a hyperspectral image first.")
+            return
+        basis, labels = self._get_or_extract_basis_spectra()
+        if basis is None:
             return
         try:
-            result = run_sam(self.hypercube, self.basis_spectra)
+            result = run_sam(self.hypercube, basis)
             self._apply_unmixing_result(result, "SAM Classification")
         except Exception as e:
             QMessageBox.critical(self, "SAM Error", f"SAM failed:\n{e}")
 
     def run_sid(self):
-        if self.hypercube is None or self.basis_spectra is None:
-            QMessageBox.warning(self, "No Basis Data", "Load reference spectra or extract endmembers first.")
+        if self.hypercube is None:
+            QMessageBox.warning(self, "No Data", "Load a hyperspectral image first.")
+            return
+        basis, labels = self._get_or_extract_basis_spectra()
+        if basis is None:
             return
         try:
-            result = run_sid(self.hypercube, self.basis_spectra)
+            result = run_sid(self.hypercube, basis)
             self._apply_unmixing_result(result, "SID Classification")
         except Exception as e:
             QMessageBox.critical(self, "SID Error", f"SID failed:\n{e}")
 
-    def run_svr(self):
-        if self.hypercube is None or self.basis_spectra is None:
-            QMessageBox.warning(self, "No Basis Data", "Load reference spectra or extract endmembers first.")
+    def run_fcls(self):
+        if self.hypercube is None:
+            QMessageBox.warning(self, "No Data", "Load a hyperspectral image first.")
             return
+        basis, labels = self._get_or_extract_basis_spectra()
+        if basis is None:
+            return
+        cube = self._get_normalized_hypercube()
         self.progress_bar.setValue(10)
-        self.unmix_status.setText("Training SVR models…")
+        mode_txt = self.norm_mode_combo.currentText()
+        self.unmix_status.setText(f"FCLS [{mode_txt}] in progress…")
         try:
-            result = run_svr(self.hypercube, self.basis_spectra, n_train=1000)
-            self._apply_unmixing_result(result, "SVR Unmixing")
+            result = run_fcls(cube, basis)
+            self._apply_unmixing_result(result, f"FCLS [{mode_txt}]")
         except Exception as e:
-            QMessageBox.critical(self, "SVR Error", f"SVR failed:\n{e}")
+            QMessageBox.critical(self, "FCLS Error", f"FCLS failed:\n{e}")
+
+    def run_mnf(self):
+        if self.hypercube is None:
+            QMessageBox.warning(self, "No Data", "Load a hyperspectral image first.")
+            return
+        H, W, L = self.hypercube.shape
+        n_comp, ok = QInputDialog.getInt(self, "MNF Decomposition", "Number of MNF Components:", 3, 2, min(10, L - 1))
+        if not ok:
+            return
+        try:
+            cube = self._get_normalized_hypercube()
+            result = run_mnf(cube, n_components=n_comp)
+            self.basis_labels = [f"MNF-{i+1}" for i in range(n_comp)]
+            self._apply_unmixing_result(result, f"MNF (K={n_comp})")
+        except Exception as e:
+            QMessageBox.critical(self, "MNF Error", f"MNF failed:\n{e}")
+
+    def run_rx(self):
+        if self.hypercube is None:
+            QMessageBox.warning(self, "No Data", "Load a hyperspectral image first.")
+            return
+        try:
+            result = run_rx(self.hypercube)
+            score_map = result['anomaly_score']
+            info = result['info']
+
+            self.ax_main.clear()
+            im = self.ax_main.imshow(score_map, cmap='hot', interpolation='nearest')
+            self.ax_main.set_title("RX Anomaly Detection")
+            self.ax_cbar.clear()
+            self.image_fig.colorbar(im, cax=self.ax_cbar, orientation='vertical')
+            self.image_canvas.draw_idle()
+
+            self.unmix_status.setText(
+                f"RX Anomaly Detection — Mean: {info['mean_score']:.2f}, "
+                f"Max: {info['max_score']:.2f}, 99th pct: {info['threshold_99']:.2f}")
+            self.unmix_status.setStyleSheet("color: green; font-weight: bold;")
+            self.progress_bar.setValue(100)
+        except Exception as e:
+            QMessageBox.critical(self, "RX Error", f"RX anomaly detection failed:\n{e}")
 
     def run_ica(self):
         if self.hypercube is None:
             QMessageBox.warning(self, "No Data", "Load a hyperspectral image first.")
             return
         H, W, L = self.hypercube.shape
+        n_comp, ok = QInputDialog.getInt(self, "ICA Decomposition", "Number of Independent Components:", 3, 2, min(10, L - 1))
+        if not ok:
+            return
         try:
             from sklearn.decomposition import FastICA
-            data = self.hypercube.reshape(-1, L).astype(float)
-            ica = FastICA(n_components=min(5, L-1), random_state=42)
+            cube = self._get_normalized_hypercube()
+            data = cube.reshape(-1, L).astype(float)
+            ica = FastICA(n_components=n_comp, random_state=42, max_iter=500)
             C = ica.fit_transform(data)
             S_mat = ica.components_
             reconstructed = C @ S_mat
@@ -1812,7 +2672,8 @@ class UnmixerWindow(QMainWindow):
                 'residuals': np.sqrt(ss_res / L).reshape(H, W),
                 'info': {'n_components': S_mat.shape[0]}
             }
-            self._apply_unmixing_result(result, "ICA Decomposition")
+            self.basis_labels = [f"IC-{i+1}" for i in range(n_comp)]
+            self._apply_unmixing_result(result, f"ICA (K={n_comp})")
         except Exception as e:
             QMessageBox.critical(self, "ICA Error", f"ICA failed:\n{e}")
 
@@ -1821,14 +2682,14 @@ class UnmixerWindow(QMainWindow):
             QMessageBox.warning(self, "No Data", "Load a hyperspectral image first.")
             return
         H, W, L = self.hypercube.shape
-        n_end, ok = QInputDialog.getInt(self, "N-FINDR", "Number of endmembers:", 3, 2, min(10, L-1))
+        n_end, ok = QInputDialog.getInt(self, "N-FINDR Endmember Extraction", "Number of endmembers:", 3, 2, min(10, L-1))
         if ok:
             try:
                 res = run_nfindr(self.hypercube, n_endmembers=n_end)
                 self.basis_spectra = res['endmembers']
-                self.basis_labels = [f"Endmember {i+1}" for i in range(n_end)]
-                self._show_reference_window()
-                QMessageBox.information(self, "N-FINDR Success", f"Extracted {n_end} endmembers via N-FINDR.")
+                self.basis_labels = [f"N-FINDR Endmember {i+1}" for i in range(n_end)]
+                result = run_linear_unmix(self.hypercube, self.basis_spectra)
+                self._apply_unmixing_result(result, f"N-FINDR Unmixing (K={n_end})")
             except Exception as e:
                 QMessageBox.critical(self, "N-FINDR Error", str(e))
 
@@ -1837,14 +2698,14 @@ class UnmixerWindow(QMainWindow):
             QMessageBox.warning(self, "No Data", "Load a hyperspectral image first.")
             return
         H, W, L = self.hypercube.shape
-        n_end, ok = QInputDialog.getInt(self, "VCA", "Number of endmembers:", 3, 2, min(10, L-1))
+        n_end, ok = QInputDialog.getInt(self, "VCA Endmember Extraction", "Number of endmembers:", 3, 2, min(10, L-1))
         if ok:
             try:
                 res = run_vca(self.hypercube, n_endmembers=n_end)
                 self.basis_spectra = res['endmembers']
-                self.basis_labels = [f"Endmember {i+1}" for i in range(n_end)]
-                self._show_reference_window()
-                QMessageBox.information(self, "VCA Success", f"Extracted {n_end} endmembers via VCA.")
+                self.basis_labels = [f"VCA Endmember {i+1}" for i in range(n_end)]
+                result = run_linear_unmix(self.hypercube, self.basis_spectra)
+                self._apply_unmixing_result(result, f"VCA Unmixing (K={n_end})")
             except Exception as e:
                 QMessageBox.critical(self, "VCA Error", str(e))
 
@@ -1862,17 +2723,42 @@ class UnmixerWindow(QMainWindow):
         spectrum = self.current_selection['spectrum']
         try:
             res = fit_spectrum(spectrum, wavelengths=self.basis_wavelengths, model=model_type)
-            fig, ax = plt.subplots(figsize=(8, 4))
             wl = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, len(spectrum) + 1, dtype=float)
-            ax.plot(wl, spectrum, 'k.', label='Measured')
-            ax.plot(wl, res['fitted'], 'r-', label=f"{model_type.title()} Fit")
-            ax.set_xlabel("Wavelength / Band")
-            ax.set_ylabel("Intensity")
-            ax.set_title(f"Peak Fitting — {len(res['peaks'])} Peaks Found (χ²={res['info']['chi2']:.4e})")
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            fig.tight_layout()
-            fig.show()
+
+            self.analysis_fig.clear()
+            gs = self.analysis_fig.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.15)
+            ax1 = self.analysis_fig.add_subplot(gs[0])
+            ax2 = self.analysis_fig.add_subplot(gs[1], sharex=ax1)
+
+            # Subplot 1: Measured Spectrum + Total Fitted Curve
+            ax1.plot(wl, spectrum, 'k.', markersize=6, label='Measured Data')
+            ax1.plot(wl, res['fitted'], 'r-', linewidth=2.0, label=f"{model_type.title()} Fit (Total)")
+
+            # Draw individual peak components
+            for pk_i, pk in enumerate(res.get('peaks', [])):
+                if 'component' in pk:
+                    ax1.plot(wl, pk['component'], '--', alpha=0.7, label=f"Peak #{pk_i+1} @ {pk.get('center', 0):.1f}")
+
+            ax1.set_ylabel("Intensity")
+            ax1.set_title(f"Peak Fitting — {len(res.get('peaks', []))} Peaks Found ({model_type.title()})")
+            ax1.grid(True, alpha=0.3)
+            ax1.legend(loc='upper right', fontsize=8)
+
+            # Subplot 2: Residual Fit Errors
+            residuals = spectrum - res['fitted']
+            ax2.plot(wl, residuals, 'b-', linewidth=1.5, label='Residual Error')
+            ax2.axhline(0, color='gray', linestyle=':', alpha=0.7)
+            ax2.set_xlabel("Wavelength / Band")
+            ax2.set_ylabel("Residual")
+            ax2.grid(True, alpha=0.3)
+            ax2.legend(loc='upper right', fontsize=8)
+
+            self.analysis_fig.tight_layout()
+            self.analysis_canvas.draw_idle()
+
+            if hasattr(self, 'plot_tabs'):
+                self.plot_tabs.setCurrentIndex(1)
+            self.statusBar().showMessage(f"Peak Fit Complete: {len(res.get('peaks', []))} peaks fitted.")
         except Exception as e:
             QMessageBox.critical(self, "Fit Error", str(e))
 
@@ -1923,7 +2809,7 @@ class UnmixerWindow(QMainWindow):
 
     def _apply_unmixing_result(self, result, algo_name):
         self.concentrations = result['concentrations']
-        self.basis_spectra = result.get('basis_spectra', self.basis_spectra)
+        self.basis_spectra = result.get('basis_spectra')
         self.r_squared = result.get('r_squared')
         self.residuals = result.get('residuals')
         self.unmixing_done = True
@@ -1934,47 +2820,80 @@ class UnmixerWindow(QMainWindow):
         self.unmix_status.setStyleSheet("color: green; font-weight: bold;")
         self.export_action.setEnabled(True)
 
+        self.component_combo.blockSignals(True)
         self.component_combo.clear()
-        self.component_combo.addItem("Total Concentration", 'total')
+        self.component_combo.addItem("Total Intensity / Concentration", 'total')
         if self.r_squared is not None:
-            self.component_combo.addItem("R² Map", 'r2')
+            self.component_combo.addItem("R² Fit Map", 'r2')
         if self.residuals is not None:
-            self.component_combo.addItem("Residual RMS", 'residual')
+            self.component_combo.addItem("Residual RMS Map", 'residual')
 
         K = self.concentrations.shape[2]
-        labels = self.basis_labels or [f"Component {i+1}" for i in range(K)]
+        if self.basis_spectra is not None and self.basis_spectra.shape[0] == K:
+            if self.basis_labels is None or len(self.basis_labels) != K:
+                labels = [f"{algo_name} Component {i+1}" for i in range(K)]
+                self.basis_labels = labels
+            else:
+                labels = self.basis_labels
+        else:
+            labels = [f"{algo_name} Component {i+1}" for i in range(K)]
+            self.basis_labels = labels
+
         for i in range(K):
             lbl = labels[i] if i < len(labels) else f"Component {i+1}"
             self.component_combo.addItem(lbl, i)
 
+        self.component_combo.blockSignals(False)
         self._on_component_changed(0)
 
-    def _on_component_changed(self, index):
-        if self.concentrations is None:
-            return
-        data_data = self.component_combo.currentData()
-        if data_data == 'total':
-            disp = self.concentrations.sum(axis=2)
-            title = "Total Concentration"
-        elif data_data == 'r2':
-            disp = self.r_squared
-            title = "R² Map"
-        elif data_data == 'residual':
-            disp = self.residuals
-            title = "Residual RMS Map"
-        elif isinstance(data_data, int):
-            disp = self.concentrations[:, :, data_data]
-            lbl = self.basis_labels[data_data] if self.basis_labels and data_data < len(self.basis_labels) else f"Comp {data_data+1}"
-            title = f"Abundance: {lbl}"
-        else:
-            disp = self.concentrations[:, :, 0]
-            title = "Component 1"
+        # Automatically populate generated members into the Right List Box (Basis / Reference Spectra)
+        if self.basis_spectra is not None and self.basis_spectra.shape[0] == K:
+            self.basis_spectra_list = []
+            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+            for i in range(K):
+                lbl = labels[i] if i < len(labels) else f"{algo_name} Component {i+1}"
+                sdata = SpectrumData(
+                    self.basis_spectra[i], label=lbl, color=colors[i % len(colors)],
+                    selection_type='basis', coords=None
+                )
+                self.basis_spectra_list.append(sdata)
 
-        H, W = disp.shape
-        self.ax_main.clear()
-        im = self.ax_main.imshow(disp, cmap=self.current_colormap)
-        self.ax_main.set_title(title)
-        self.image_canvas.draw_idle()
+            self.update_basis_checkbox_list()
+
+        # Clear old analysis plots completely and render new component spectra
+        self.analysis_fig.clear()
+        mode = self.norm_mode_combo.currentData() if hasattr(self, 'norm_mode_combo') else 'raw'
+        if self.basis_spectra is not None:
+            ax = self.analysis_fig.add_subplot(111)
+            wl = self.basis_wavelengths if self.basis_wavelengths is not None else np.arange(1, self.basis_spectra.shape[1] + 1, dtype=float)
+            n_curves = min(15, self.basis_spectra.shape[0])
+            for idx in range(n_curves):
+                lbl = labels[idx] if idx < len(labels) else f"Component {idx+1}"
+                spec = self._apply_spectral_normalization(self.basis_spectra[idx], mode)
+                ax.plot(wl, spec, linewidth=2.0, label=lbl)
+
+            ax.set_xlabel("Spectral Band / Wavelength")
+            mode_titles = {
+                'raw': "Component Amplitude / Endmember Intensity",
+                'total': "Normalized Amplitude (spec / sum)",
+                'peak': "Peak Normalized Amplitude (spec / max)",
+                'l2': "L2 Vector Norm (spec / ||spec||)",
+                'snv': "SNV Z-Score ((spec - μ) / σ)"
+            }
+            ax.set_ylabel(mode_titles.get(mode, "Component Amplitude"))
+            ax.set_title(f"{algo_name} — Component Spectra [{mode_titles.get(mode, 'Original')}] (K={self.basis_spectra.shape[0]}) [Mean R²: {mean_r2:.4f}]")
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc='upper right', fontsize=8)
+
+        self.analysis_fig.tight_layout()
+        self.analysis_canvas.draw_idle()
+
+        if hasattr(self, 'plot_tabs'):
+            self.plot_tabs.setCurrentIndex(1)
+
+    def _on_component_changed(self, index):
+        if self.hypercube is not None:
+            self.display_frame(self.current_frame)
 
     def export_results(self):
         if self.concentrations is None:
@@ -1998,48 +2917,150 @@ class UnmixerWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to export results: {e}")
 
     def show_about(self):
-        """Show about / help dialog displaying README.md content."""
+        """Show about / help dialog displaying Comprehensive Analysis Guide."""
         self.show_help()
 
     def show_help(self):
-        """Show user guide and documentation from README.md in a scrollable dialog."""
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
-
-        possible_paths = [
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "README.md"),
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "README.md"),
-            os.path.join(os.getcwd(), "README.md"),
-        ]
-        readme_path = None
-        for p in possible_paths:
-            if os.path.exists(p):
-                readme_path = p
-                break
-
-        content = ""
-        if readme_path:
-            try:
-                with open(readme_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-            except Exception as e:
-                content = f"Error reading README.md: {e}"
-        else:
-            content = "README.md file not found."
-
+        """Show comprehensive interactive user guide and algorithm documentation window."""
         dialog = QDialog(self)
-        dialog.setWindowTitle("User Guide & Documentation - README.md")
-        dialog.resize(850, 650)
+        dialog.setWindowTitle("Hyperspectral Analysis & Unmixing Method Guide")
+        dialog.resize(950, 750)
         layout = QVBoxLayout(dialog)
 
         text_edit = QTextEdit(dialog)
         text_edit.setReadOnly(True)
-        if hasattr(text_edit, 'setMarkdown'):
-            text_edit.setMarkdown(content)
-        else:
-            text_edit.setPlainText(content)
 
+        guide_html = r"""
+        <h2>🔬 Hyperspectral Analysis & Unmixing Method Guide</h2>
+        <p>This guide explains each numerical algorithm, what inputs are required, optimal use cases, and failure modes.</p>
+        <hr>
+
+        <h3>1. Linear & Supervised Unmixing (Requires Basis Library)</h3>
+        
+        <h4>🟢 Non-Negative Least Squares (NNLS)</h4>
+        <ul>
+            <li><b>What it Needs:</b> Target image cube + active Basis spectra library in the Right List Box (<code>Basis / Reference Spectra</code>).</li>
+            <li><b>How it Works:</b> Solves \(\min_{C \ge 0} \|Y - C B\|_2^2\) for non-negative concentration maps \(C\).</li>
+            <li><b>When it Works Well:</b> When all physical chemical components in the sample are present in the basis library and light mixing is linear.</li>
+            <li><b>When it Fails:</b> Fails if an unknown component is missing from the basis library (forces other components to compensate, inflating residuals) or if basis spectra are highly collinear/identical.</li>
+        </ul>
+
+        <h4>🟢 Multiple Endmember Spectral Mixture Analysis (MESMA)</h4>
+        <ul>
+            <li><b>What it Needs:</b> Target image cube + reference endmember library (e.g., 4 to 20 reference spectra).</li>
+            <li><b>How it Works:</b> Evaluates all subsets of endmembers (e.g. best 2, 3, or 4) for <i>each pixel independently</i> and selects the combination yielding the minimum residual error.</li>
+            <li><b>When it Works Well:</b> Ideal for complex samples where not every pixel contains all endmembers (e.g., spatially heterogeneous samples).</li>
+            <li><b>When it Fails:</b> Combinatorial explosion if library size \(K > 30\) (causes slowdown). Fails if endmembers lack distinct spectral features.</li>
+        </ul>
+
+        <h4>🟢 Spectral Angle Mapper (SAM)</h4>
+        <ul>
+            <li><b>What it Needs:</b> Target image cube + reference spectra library.</li>
+            <li><b>How it Works:</b> Computes spectral angle \(\theta = \arccos\left(\frac{y \cdot b}{\|y\| \|b\|}\right)\) between pixel spectrum and basis vectors.</li>
+            <li><b>When it Works Well:</b> Insensitive to overall illumination intensity variations, shading, and throughput fluctuations. Excellent for shape-based classification.</li>
+            <li><b>When it Fails:</b> Fails when chemical discrimination relies on absolute intensity magnitude rather than spectral shape.</li>
+        </ul>
+
+        <h4>🟢 Spectral Information Divergence (SID)</h4>
+        <ul>
+            <li><b>What it Needs:</b> Target image cube + reference spectra library.</li>
+            <li><b>How it Works:</b> Measures Kullback-Leibler information divergence between normalized spectral probability distributions.</li>
+            <li><b>When it Works Well:</b> Highly sensitive to subtle spectral shape differences and slope changes.</li>
+            <li><b>When it Fails:</b> Sensitive to zero/negative values (requires positive non-zero spectra).</li>
+        </ul>
+
+        <h4>🟢 Fully Constrained Least Squares (FCLS)</h4>
+        <ul>
+            <li><b>What it Needs:</b> Target image cube + active Basis spectra library.</li>
+            <li><b>How it Works:</b> Solves NNLS with an additional sum-to-one constraint (\(\sum C_k = 1\)) per pixel via augmented matrix formulation (Heinz &amp; Chang 2001).</li>
+            <li><b>When it Works Well:</b> Gold standard for physical abundance estimation — concentrations represent true fractional abundances summing to 100%.</li>
+            <li><b>When it Fails:</b> Fails if some physical components are missing from basis (the sum-to-one constraint forces overestimation of remaining components).</li>
+        </ul>
+
+        <h4>🟢 RX Anomaly Detection</h4>
+        <ul>
+            <li><b>What it Needs:</b> Target image cube only (no reference spectra).</li>
+            <li><b>How it Works:</b> Computes Mahalanobis distance of each pixel from the global spectral mean using the inverse covariance matrix.</li>
+            <li><b>When it Works Well:</b> Detecting spectrally unusual pixels (contaminants, defects, rare materials) without prior knowledge of what to look for.</li>
+            <li><b>When it Fails:</b> Fails when anomalies are frequent enough to dominate the covariance estimate.</li>
+        </ul>
+        <hr>
+
+        <h3>2. Blind Source Separation & Decomposition (No Basis Needed)</h3>
+
+        <h4>🔵 Multivariate Curve Resolution - Alternating Least Squares (MCR-ALS)</h4>
+        <ul>
+            <li><b>What it Needs:</b> Target image cube + component count \(K\) (Prompted from 2 to 10).</li>
+            <li><b>How it Works:</b> Iteratively updates concentrations \(C\) and spectra \(S\) via alternating least squares with VCA seed initialization.</li>
+            <li><b>When it Works Well:</b> Outstanding for completely blind samples where reference spectra are unknown. Enforces non-negativity and optional closure (\(\sum C_k = 1\)).</li>
+            <li><b>When it Fails:</b> Requires distinct initial endmembers; can collapse into duplicate components if component count \(K\) is set too high for the dataset's true rank.</li>
+        </ul>
+
+        <h4>🔵 Non-Negative Matrix Factorization (NMF)</h4>
+        <ul>
+            <li><b>What it Needs:</b> Target image cube + component count \(K\).</li>
+            <li><b>How it Works:</b> Multiplicative non-negative matrix update \(Y \approx W H\).</li>
+            <li><b>When it Works Well:</b> Extracting additive, non-negative parts-based components.</li>
+            <li><b>When it Fails:</b> Non-convex optimization; sensitive to initial random seed.</li>
+        </ul>
+
+        <h4>🔵 Vertex Component Analysis (VCA)</h4>
+        <ul>
+            <li><b>What it Needs:</b> Target image cube + endmember count \(K\).</li>
+            <li><b>How it Works:</b> Simplex geometry projection to identify extreme vertices (pure endmembers).</li>
+            <li><b>When it Works Well:</b> Fast and robust endmember extraction when pure or near-pure pixels exist in the scene.</li>
+            <li><b>When it Fails:</b> Fails if the sample is extremely intimately mixed (no pure pixels present).</li>
+        </ul>
+
+        <h4>🔵 Principal Component Analysis (PCA)</h4>
+        <ul>
+            <li><b>What it Needs:</b> Target image cube + component count \(K\).</li>
+            <li><b>How it Works:</b> Orthogonal SVD decomposition maximizing variance.</li>
+            <li><b>When it Works Well:</b> Dimensionality reduction, decorrelation, and noise reduction.</li>
+            <li><b>When it Fails:</b> Yields negative values and orthogonal axes that do <b>NOT</b> correspond to real physical spectra.</li>
+        </ul>
+
+        <h4>🔵 Minimum Noise Fraction (MNF)</h4>
+        <ul>
+            <li><b>What it Needs:</b> Target image cube + component count \(K\).</li>
+            <li><b>How it Works:</b> Generalised eigenvalue decomposition ordering components by signal-to-noise ratio (SNR) rather than variance. Noise estimated from spatial first-differences.</li>
+            <li><b>When it Works Well:</b> Superior to PCA for noisy hyperspectral data — first components have highest SNR. Standard preprocessing step in remote sensing.</li>
+            <li><b>When it Fails:</b> Noise model assumes spatially uncorrelated noise; systematic spatial artifacts may violate this assumption.</li>
+        </ul>
+
+        <h4>🔵 Independent Component Analysis (ICA)</h4>
+        <ul>
+            <li><b>What it Needs:</b> Target image cube + component count \(K\).</li>
+            <li><b>How it Works:</b> FastICA maximizing statistical independence / non-Gaussianity.</li>
+            <li><b>When it Works Well:</b> Separating independent noise sources, artifacts, or distinct spatial patterns.</li>
+            <li><b>When it Fails:</b> Does not enforce non-negativity; sign and order of components are arbitrary.</li>
+        </ul>
+        <hr>
+
+        <h3>3. Hyperspectral Denoising Algorithms</h3>
+        <ul>
+            <li><b>3D Total Variation (3D-TV):</b> PDE primal gradient descent minimizing spatial-spectral Total Variation. Smooths noise while preserving sharp spatial edges and spectral transitions. Prompt asks for weight \(\lambda\) (e.g. 0.2 to 1.0).</li>
+            <li><b>Savitzky-Golay:</b> 1D spectral polynomial smoothing. Preserves peak heights and spectral band positions.</li>
+            <li><b>MPPCA:</b> Marchenko-Pastur PCA denoising based on random matrix theory. Automatically separates signal subspace from noise.</li>
+            <li><b>BM4D / Wavelet:</b> Advanced 4D block-matching & 1D wavelet shrinkage filters.</li>
+        </ul>
+        <hr>
+
+        <h3>4. Spectral Normalization & Standardisation Modes</h3>
+        <ul>
+            <li><b>Original (Raw):</b> Raw intensity detector counts.</li>
+            <li><b>Total Intensity:</b> Normalized by total spectral area (\(I / \sum I\)). Eliminates overall thickness/concentration variations.</li>
+            <li><b>Peak Intensity:</b> Normalized by maximum peak (\(I / I_{\max}\)). Rescales peak height to 1.0.</li>
+            <li><b>L2 Vector Norm:</b> Unit vector length normalization (\(I / \|I\|\)).</li>
+            <li><b>SNV Z-Score:</b> Standard Normal Variate (\((I - \mu) / \sigma\)). Corrects scattering baseline slopes and offsets.</li>
+        </ul>
+        """
+
+        text_edit.setHtml(guide_html)
         layout.addWidget(text_edit)
+
         close_btn = QPushButton("Close", dialog)
+        close_btn.setStyleSheet("font-weight: bold; padding: 6px;")
         close_btn.clicked.connect(dialog.accept)
         layout.addWidget(close_btn)
         dialog.exec_()
@@ -2047,6 +3068,13 @@ class UnmixerWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    app.setStyleSheet("""
+        QDialog { font-size: 11px; }
+        QDialog QLabel { font-size: 11px; }
+        QDialog QLineEdit, QDialog QSpinBox, QDialog QDoubleSpinBox { font-size: 11px; min-height: 24px; padding: 2px; }
+        QDialog QTabWidget::tab { font-size: 11px; padding: 4px 8px; }
+        QDialog QPushButton { font-size: 11px; padding: 4px 10px; min-height: 24px; }
+    """)
     window = UnmixerWindow()
     window.show()
     sys.exit(app.exec_())

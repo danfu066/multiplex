@@ -56,6 +56,25 @@ except ImportError:
     HAS_TIFFFILE = False
 
 
+def clean_navigation_toolbar(toolbar, autoscale_callback=None):
+    """
+    Remove Back (<-), Forward (->), Pan (4-way double arrow), and Subplots configuration buttons
+    from Matplotlib NavigationToolbar across both Image and Plot canvases.
+    Optionally add an '↕ Autoscale Y' button for plot canvases.
+    """
+    for action in list(toolbar.actions()):
+        txt = (action.text() or "").lower()
+        ttip = (action.toolTip() or "").lower()
+        if any(k in txt or k in ttip for k in ['back', 'forward', 'pan', 'subplots', 'configure']):
+            toolbar.removeAction(action)
+
+    if autoscale_callback is not None:
+        autoscale_action = QAction("↕ Autoscale Y", toolbar)
+        autoscale_action.setToolTip("Autoscale Y-axis limits to fit all visible curves")
+        autoscale_action.triggered.connect(autoscale_callback)
+        toolbar.addAction(autoscale_action)
+
+
 class SpectrumData:
     """Store spectrum data with metadata"""
     def __init__(self, spectrum, std=None, label="", color="blue", selection_type="point",
@@ -234,6 +253,7 @@ class HyperViewer(QMainWindow):
 
         # Built-in Matplotlib Zoom & Pan navigation toolbar for spatial view
         self.nav_toolbar = NavigationToolbar(self.image_canvas, self)
+        clean_navigation_toolbar(self.nav_toolbar)
         image_layout.addWidget(self.nav_toolbar)
 
         # Bottom Color & Scale Controls bar directly under spatial image canvas
@@ -374,6 +394,7 @@ class HyperViewer(QMainWindow):
         self.spectrum_fig = Figure(figsize=(7, 8))
         self.spectrum_canvas = FigureCanvas(self.spectrum_fig)
         self.spectrum_nav_toolbar = NavigationToolbar(self.spectrum_canvas, self)
+        clean_navigation_toolbar(self.spectrum_nav_toolbar, self.autoscale_y_axis)
         spectrum_layout.addWidget(self.spectrum_nav_toolbar)
         self.spectrum_ax = self.spectrum_fig.add_subplot(111)
         self.spectrum_ax.set_xlabel('Position (px)')
@@ -516,14 +537,32 @@ class HyperViewer(QMainWindow):
         self.clear_btn.clicked.connect(self.clear_selection)
         tool_layout.addWidget(self.clear_btn)
         
+        tool_layout.addSpacing(10)
+        tool_layout.addWidget(QLabel("X:"))
+        self.roi_x_spin = QSpinBox()
+        self.roi_x_spin.setRange(0, 99999)
+        self.roi_x_spin.setValue(0)
+        self.roi_x_spin.setToolTip("Fine-tune ROI X position (or use Arrow Keys)")
+        self.roi_x_spin.valueChanged.connect(self.on_roi_spinbox_changed)
+        tool_layout.addWidget(self.roi_x_spin)
+
+        tool_layout.addWidget(QLabel("Y:"))
+        self.roi_y_spin = QSpinBox()
+        self.roi_y_spin.setRange(0, 99999)
+        self.roi_y_spin.setValue(0)
+        self.roi_y_spin.setToolTip("Fine-tune ROI Y position (or use Arrow Keys)")
+        self.roi_y_spin.valueChanged.connect(self.on_roi_spinbox_changed)
+        tool_layout.addWidget(self.roi_y_spin)
+
         # Circle radius / Square size
         self.size_label = QLabel("Size:")
         tool_layout.addWidget(self.size_label)
         
         self.size_spinbox = QSpinBox()
-        self.size_spinbox.setRange(1, 100)
+        self.size_spinbox.setRange(1, 200)
         self.size_spinbox.setValue(10)
         self.size_spinbox.setSuffix(" px")
+        self.size_spinbox.valueChanged.connect(self.on_roi_spinbox_changed)
         tool_layout.addWidget(self.size_spinbox)
         
         # Separator
@@ -1243,6 +1282,97 @@ class HyperViewer(QMainWindow):
         self.add_btn.setEnabled(True)
         self.plot_current_spectrum()
 
+    def autoscale_y_axis(self):
+        """Autoscale Y-axis limits to fit all visible line profiles while keeping X range."""
+        ax = self.spectrum_ax
+        xlim = ax.get_xlim()
+        all_spectra = []
+        for sdata in self.spectra_list:
+            if getattr(sdata, 'visible', True):
+                all_spectra.append(sdata.spectrum)
+        if hasattr(self, 'current_selection') and self.current_selection and 'spectrum' in self.current_selection:
+            all_spectra.append(self.current_selection['spectrum'])
+
+        y_vals = []
+        for spec in all_spectra:
+            x_indices = np.arange(len(spec))
+            mask = (x_indices >= xlim[0]) & (x_indices <= xlim[1])
+            if np.any(mask):
+                y_vals.extend(spec[mask])
+            else:
+                y_vals.extend(spec)
+
+        if y_vals:
+            ymin, ymax = float(np.min(y_vals)), float(np.max(y_vals))
+            margin = (ymax - ymin) * 0.05 if ymax != ymin else 1.0
+            ax.set_ylim(ymin - margin, ymax + margin)
+            self.spectrum_canvas.draw_idle()
+
+    def keyPressEvent(self, event):
+        """Handle Arrow Keys to nudge ROI position pixel-by-pixel (Shift+Arrow for 5px jumps)."""
+        if self.hypercube is None:
+            super().keyPressEvent(event)
+            return
+
+        key = event.key()
+        if key not in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down, Qt.Key_Return, Qt.Key_Enter):
+            super().keyPressEvent(event)
+            return
+
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            self.add_current_spectrum()
+            return
+
+        step = 5 if (event.modifiers() & Qt.ShiftModifier) else 1
+        dx = -step if key == Qt.Key_Left else (step if key == Qt.Key_Right else 0)
+        dy = -step if key == Qt.Key_Up else (step if key == Qt.Key_Down else 0)
+
+        H, W, L = self.hypercube.shape
+        new_x = max(0, min(W - 1, (self.crosshair_x or W // 2) + dx))
+        new_y = max(0, min(H - 1, (self.crosshair_y or H // 2) + dy))
+
+        self.crosshair_x = new_x
+        self.crosshair_y = new_y
+
+        if hasattr(self, 'roi_x_spin') and hasattr(self, 'roi_y_spin'):
+            self.roi_x_spin.blockSignals(True)
+            self.roi_y_spin.blockSignals(True)
+            self.roi_x_spin.setValue(new_x)
+            self.roi_y_spin.setValue(new_y)
+            self.roi_x_spin.blockSignals(False)
+            self.roi_y_spin.blockSignals(False)
+
+        self.update_roi_from_position(new_x, new_y)
+
+    def on_roi_spinbox_changed(self):
+        """Callback when X, Y, or Size spinboxes change manually."""
+        if self.hypercube is None:
+            return
+        x = self.roi_x_spin.value()
+        y = self.roi_y_spin.value()
+        self.crosshair_x = x
+        self.crosshair_y = y
+        self.update_roi_from_position(x, y)
+
+    def update_roi_from_position(self, x, y):
+        """Re-extract ROI spectrum at (x, y) and redraw visual selection."""
+        if self.hypercube is None:
+            return
+
+        H, W, L = self.hypercube.shape
+        x = max(0, min(W - 1, x))
+        y = max(0, min(H - 1, y))
+
+        stype = self.selection_tool or 'point'
+        size_px = self.size_spinbox.value()
+
+        if stype == 'point':
+            self.add_point_selection(x, y)
+        elif stype == 'circle':
+            self.add_circle_selection(x, y, size_px / 2.0)
+        elif stype == 'square':
+            self.add_square_selection(x, y, size_px)
+
     def redraw_selection(self):
         """Redraw current selection overlay"""
         self.selection_overlay.patches = []  # Clear list since axes was cleared
@@ -1310,16 +1440,21 @@ class HyperViewer(QMainWindow):
 
         if has_data or self.current_selection is not None:
             self.spectrum_ax.legend(loc='upper right', fontsize=8)
-
-        # Enforce or initialize locked limits
-        if self.axes_locked:
-            if self.saved_xlim is None or self.saved_ylim is None:
-                # First draw: save the autoscaled limits
-                self.saved_xlim = self.spectrum_ax.get_xlim()
-                self.saved_ylim = self.spectrum_ax.get_ylim()
-            else:
-                self.spectrum_ax.set_xlim(self.saved_xlim)
-                self.spectrum_ax.set_ylim(self.saved_ylim)
+            self.spectrum_ax.relim()
+            d = self.spectrum_ax.dataLim
+            if np.isfinite(d.xmin) and np.isfinite(d.xmax) and np.isfinite(d.ymin) and np.isfinite(d.ymax):
+                x_margin = (d.xmax - d.xmin) * 0.05 if d.xmax != d.xmin else 1.0
+                y_margin = (d.ymax - d.ymin) * 0.05 if d.ymax != d.ymin else 0.1
+                computed_xlim = (d.xmin - x_margin, d.xmax + x_margin)
+                computed_ylim = (d.ymin - y_margin, d.ymax + y_margin)
+                if not self.axes_locked or self.saved_xlim is None or self.saved_ylim is None:
+                    self.spectrum_ax.set_xlim(computed_xlim)
+                    self.spectrum_ax.set_ylim(computed_ylim)
+                    self.saved_xlim = computed_xlim
+                    self.saved_ylim = computed_ylim
+                else:
+                    self.spectrum_ax.set_xlim(self.saved_xlim)
+                    self.spectrum_ax.set_ylim(self.saved_ylim)
 
         self.spectrum_canvas.draw_idle()
 
@@ -2227,13 +2362,18 @@ class SpectraDisplayWindow(QMainWindow):
 def main():
     """Main entry point"""
     app = QApplication(sys.argv)
-    
-    # Set application style
     app.setStyle('Fusion')
-    
+    app.setStyleSheet("""
+        QDialog { font-size: 11px; }
+        QDialog QLabel { font-size: 11px; }
+        QDialog QLineEdit, QDialog QSpinBox, QDoubleSpinBox { font-size: 11px; min-height: 24px; padding: 2px; }
+        QDialog QTabWidget::tab { font-size: 11px; padding: 4px 8px; }
+        QDialog QPushButton { font-size: 11px; padding: 4px 10px; min-height: 24px; }
+    """)
+
     viewer = HyperViewer()
     viewer.show()
-    
+
     sys.exit(app.exec_())
 
 

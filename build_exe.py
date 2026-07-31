@@ -50,7 +50,7 @@ def build_executable(target_key, mode="folder"):
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconsole",
-        "--clean",
+        "--noconfirm",
         "--name", name
     ]
 
@@ -72,10 +72,10 @@ def build_executable(target_key, mode="folder"):
     res = subprocess.run(cmd)
     if res.returncode == 0:
         dist_path = os.path.abspath(os.path.join("dist", name))
-        print(f"\n✅ BUILD SUCCESSFUL!")
+        print(f"\n[SUCCESS] BUILD SUCCESSFUL!")
         print(f"Executable output directory: {dist_path}")
     else:
-        print(f"\n❌ BUILD FAILED with exit code {res.returncode}")
+        print(f"\n[FAILED] BUILD FAILED with exit code {res.returncode}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build Standalone EXE with PyInstaller")
